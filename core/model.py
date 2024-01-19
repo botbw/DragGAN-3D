@@ -5,6 +5,7 @@ import torch.nn as nn
 from functools import partial
 from core.point import Point
 import torch.nn.functional as F
+from training.volumetric_rendering.renderer import sample_from_planes
 
 
 class GAN3DBackbone(nn.Module):
@@ -95,13 +96,24 @@ def wrap_eg3d_backbone(backbone: Callable) -> GAN3DBackbone:
 
     return GAN3DBackbone(backbone)
 
+
 class DragStep(nn.Module):
-    def __init__(self, backbone_3dgan: GAN3DBackbone, *args, **kwargs) -> None:
+
+    def __init__(self,
+                 backbone_3dgan: GAN3DBackbone,
+                 device: torch.device = torch.device('cuda'),
+                 *args,
+                 **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        assert isinstance(backbone_3dgan, GAN3DBackbone), "Please wrap your backbone to make sure it returns what are enfored in GAN3DBackbone."
-        self.backbone_3dgan = backbone_3dgan
+        assert isinstance(
+            backbone_3dgan, GAN3DBackbone
+        ), "Please wrap your backbone to make sure it returns what are enfored in GAN3DBackbone."
+        self.device = device
+        self.backbone_3dgan = backbone_3dgan.to(device)
         self.w0 = None
         self.planes0_ref = None
+        self.planes0_resized = None
+        self.device = device
 
     # # Generate random latents.
     # z = torch.from_numpy(np.random.RandomState(w0_seed).randn(1, 512)).to(self._device, dtype=self._dtype)
@@ -109,33 +121,50 @@ class DragStep(nn.Module):
     # # Run mapping network.
     # label = torch.zeros([1, G.c_dim], device=self._device)
     # w = G.mapping(z, label, truncation_psi=trunc_psi, truncation_cutoff=trunc_cutoff)
-    def forward(self,
-                ws: torch.Tensor,
-                camera_parameters: torch.Tensor,
-                points_start: List[Point],
-                points_end: List[Point],
-                mask: torch.Tensor,
-                ):
-        if self.w0 is None: # TODO @botbw: try to make forward functional
+    def forward(
+        self,
+        ws: torch.Tensor,
+        camera_parameters: torch.Tensor,
+        points_start: List[Point],
+        points_end: List[Point],
+        mask: torch.Tensor,
+    ):
+        if self.w0 is None:  # TODO @botbw: try to make forward functional
             self.w0 = ws.detach().clone()
 
-        ws = torch.cat([ws[:,:6,:], self.w0[:,6:,:]], dim=1)
+        ws = torch.cat([ws[:, :6, :], self.w0[:, 6:, :]], dim=1)
 
         ret = self.backbone_3dgan.foward(ws, camera_parameters)
         img, planes = ret['image'], ret['planes']
-        assert planes.shape == (1, 3, 256, 256, 32), "eg3d plane sizes" # TODO @botbw: decouple from eg3d, remove redundant dims
+        assert planes.shape == (
+            1, 3, 256, 256, 32
+        ), "eg3d plane sizes"  # TODO @botbw: decouple from eg3d, remove redundant dims
         planes = planes[0].permute(0, 3, 1, 2)
-
+        assert planes.shape == (3, 32, 256, 256), "eg3d plane sizes"
         # h, w = G.img_resolution, G.img_resolution
-        h, w = 300, 300 # TODO @botbw should be output figure size
-                        # H = W = self.neural_rendering_resolution?
-
+        h, w = 300, 300  # TODO @botbw should be output figure size
+        # H = W = self.neural_rendering_resolution?
 
         X = torch.linspace(0, h, h)
         Y = torch.linspace(0, w, w)
         xx, yy = torch.meshgrid(X, Y, indexing='ij')
-        planes = F.interpolate(planes, [h, w], mode='bilinear')
-
+        planes_resized = F.interpolate(planes, [
+            h, w
+        ], mode='bilinear').unsqueeze(
+            0
+        )  # TODO @botbw: decouple from eg3d, requires (N, n_planes, C, H, W)
         if self.planes0_ref is None:
+            assert self.planes0_resized is None
+            self.planes0_resized = planes_resized.detach().clone()
+            self.planes0_ref = []
+            for point in points_start:  # TODO @botbw: decouple from eg3d
+                self.planes0_ref.append(
+                    sample_from_planes(self.backbone_3dgan.renderer.plane_axes,
+                                       self.planes0_resized,
+                                       point.to_tensor(
+                                           self.backbone_3dgan.device),
+                                       box_warp=self.backbone_3dgan.
+                                       rendering_kwargs['box_warp']))
 
-
+        # Point tracking with feature matching
+        

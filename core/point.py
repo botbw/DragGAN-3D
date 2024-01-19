@@ -6,7 +6,6 @@ class Point:
     x: int
     y: int
     z: int
-
-def get_feature_from_planes(p: Point, planes: torch.Tensor):
-    assert planes.shape[0] == 3, "three planes"
     
+    def to_tensor(self, device):
+        return torch.tensor([self.x, self.y, self.z], device=device)

@@ -167,3 +167,8 @@ cython_debug/
 
 # model binary
 ckpts
+
+# symbolic links
+dnnlib
+torch_utils
+training
