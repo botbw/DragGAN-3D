@@ -125,46 +125,98 @@ class DragStep(nn.Module):
         self,
         ws: torch.Tensor,
         camera_parameters: torch.Tensor,
-        points_start: List[Point],
-        points_end: List[Point],
-        mask: torch.Tensor,
+        points_cur: List[Point],
+        points_target: List[Point],
+        mask: Optional[torch.Tensor]=None,
+        r1: int=3,
+        r2: int=12,
     ):
-        if self.w0 is None:  # TODO @botbw: try to make forward functional
-            self.w0 = ws.detach().clone()
+        # if self.w0 is None:  # TODO @botbw: try to make forward functional
+        #     self.w0 = ws.detach().clone()
 
-        ws = torch.cat([ws[:, :6, :], self.w0[:, 6:, :]], dim=1)
+        # ws = torch.cat([ws[:, :6, :], self.w0[:, 6:, :]], dim=1)
 
         ret = self.backbone_3dgan.foward(ws, camera_parameters)
         img, planes = ret['image'], ret['planes']
         assert planes.shape == (
-            1, 3, 256, 256, 32
+            1, 3, 32, 256, 256
         ), "eg3d plane sizes"  # TODO @botbw: decouple from eg3d, remove redundant dims
-        planes = planes[0].permute(0, 3, 1, 2)
+        planes = planes[0]
         assert planes.shape == (3, 32, 256, 256), "eg3d plane sizes"
         # h, w = G.img_resolution, G.img_resolution
-        h, w = 300, 300  # TODO @botbw should be output figure size
+        x_lim, y_lim, z_lim = 300, 300, 300  # TODO @botbw should be output figure size
         # H = W = self.neural_rendering_resolution?
 
-        X = torch.linspace(0, h, h)
-        Y = torch.linspace(0, w, w)
-        xx, yy = torch.meshgrid(X, Y, indexing='ij')
         planes_resized = F.interpolate(planes, [
-            h, w
+            x_lim, y_lim
         ], mode='bilinear').unsqueeze(
             0
         )  # TODO @botbw: decouple from eg3d, requires (N, n_planes, C, H, W)
+
         if self.planes0_ref is None:
             assert self.planes0_resized is None
             self.planes0_resized = planes_resized.detach().clone()
-            self.planes0_ref = []
-            for point in points_start:  # TODO @botbw: decouple from eg3d
-                self.planes0_ref.append(
-                    sample_from_planes(self.backbone_3dgan.renderer.plane_axes,
+            points_feat = []
+            for point in points_cur:  # TODO @botbw: decouple from eg3d and simplify this
+                feat = sample_from_planes(self.backbone_3dgan.backbone.renderer.plane_axes,
                                        self.planes0_resized,
                                        point.to_tensor(
-                                           self.backbone_3dgan.device),
-                                       box_warp=self.backbone_3dgan.
-                                       rendering_kwargs['box_warp']))
+                                           self.device).unsqueeze(0).unsqueeze(0), # _, M, _ = coordinates.shape
+                                       box_warp=self.backbone_3dgan.backbone.    # batch (1), n_points, 3
+                                       rendering_kwargs['box_warp'])
+                points_feat.append(feat) # feat: [1, 3, 1, 32]
+            self.planes0_ref = torch.concat(points_feat, dim=2).permute(2, 0, 1, 3).reshape(-1, 96) # [1, 3, n_points, 32] to [n_points, 96]
 
         # Point tracking with feature matching
-        
+        points_after_step = []
+        with torch.no_grad():
+            for i, point in enumerate(points_cur):
+                r = round(r2 / 512 * x_lim) # TODO @botbw: what is this? is r2 / 512 relative value?
+                cordinates = point.gen_cube_coordinates(r, x_lim=x_lim, y_lim=y_lim, z_lim=z_lim).unsqueeze(0).to(self.device)
+                feat_patch = sample_from_planes(self.backbone_3dgan.backbone.renderer.plane_axes, planes_resized, cordinates, box_warp=self.backbone_3dgan.backbone.rendering_kwargs['box_warp']) # [1, 3, n_points, 32]
+                feat_patch = feat_patch.squeeze().permute(1, 0, 2).view(-1, 96) # [1, 3, n_points, 32] to [n_points, 96]
+                L2 = torch.linalg.norm(feat_patch - self.planes0_ref[i], dim=-1)
+                _, idx = torch.min(L2.view(1,-1), -1)
+                points_after_step.append(Point(cordinates[0, idx, 0], cordinates[0, idx, 1], cordinates[0, idx, 2]))
+
+        assert len(points_cur) == len(points_target), "Number of points should be the same."
+
+        finished = True # TODO @botbw: change to tensor
+        for p_cur, p_tar in zip(points_cur, points_target):
+            v_cur_tar = p_tar.to_tensor(self.device) - p_cur.to_tensor(self.device)
+            length_v_cur_tar = torch.norm(v_cur_tar)
+
+            if length_v_cur_tar > max(2 / 512 * x_lim, 2): # TODO @botbw: update this according to eg3d
+                finished = False
+
+            if length_v_cur_tar > 1:
+                r = round(r1 / 512 * x_lim)
+                e_cur_tar = v_cur_tar / length_v_cur_tar
+                coordinates = p_cur.gen_sphere_coordinates(r, self.device, x_lim, y_lim, z_lim)
+                normed_new_coordinates = (coordinates + e_cur_tar) / torch.tensor([x_lim, y_lim, z_lim], device=self.device) * 2 - 1
+
+
+
+if __name__ == "__main__":
+    import pickle
+    from eg3d.eg3d.camera_utils import FOV_to_intrinsics, LookAtPoseSampler
+    cam2world_pose = LookAtPoseSampler.sample(3.14 / 2,
+                                            3.14 / 2,
+                                            torch.tensor([0, 0, 0.2],
+                                                        device='cuda'),
+                                            radius=2.7,
+                                            device='cuda')
+
+    fov_deg = 18.837
+    intrinsics = FOV_to_intrinsics(fov_deg, device='cuda')
+    with open('ckpts/ffhq512-128.pkl', 'rb') as f:
+        G = pickle.load(f)['G_ema'].cuda()  # torch.nn.Module
+    z = torch.randn([1, G.z_dim]).cuda()    # latent codes
+    c = torch.cat([cam2world_pose.reshape(-1, 16),
+                intrinsics.reshape(-1, 9)], 1)  # camera parameters
+    DragStep(wrap_eg3d_backbone(G), torch.device('cuda'))(
+        ws=z,
+        camera_parameters=c,
+        points_cur=[Point(0, 0, 0), Point(1, 1, 1)],
+        points_target=[Point(10, 10, 10), Point(20, 20, 20)],
+    )
