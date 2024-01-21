@@ -172,3 +172,8 @@ ckpts
 dnnlib
 torch_utils
 training
+
+# images
+*.png
+*.jpg
+*.jpeg

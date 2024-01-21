@@ -1,4 +1,4 @@
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from abc import ABC, abstractmethod
 import torch
 import torch.nn as nn
@@ -6,7 +6,7 @@ from functools import partial
 from core.point import Point
 import torch.nn.functional as F
 from training.volumetric_rendering.renderer import sample_from_planes
-
+from core.utils import save_eg3d_img, seed_everything
 
 class GAN3DBackbone(nn.Module):
 
@@ -29,6 +29,8 @@ class GAN3DBackbone(nn.Module):
         self.check_return(ret)
         return ret
 
+    # def __getattr__(self, name: str) -> Any:
+    #     return getattr(self.backbone, name)
 
 def wrap_eg3d_backbone(backbone: Callable) -> GAN3DBackbone:
     # modified from eg3d/eg3d/training/triplane.py
@@ -172,16 +174,19 @@ class DragStep(nn.Module):
         with torch.no_grad():
             for i, point in enumerate(points_cur):
                 r = round(r2 / 512 * x_lim) # TODO @botbw: what is this? is r2 / 512 relative value?
-                cordinates = point.gen_cube_coordinates(r, x_lim=x_lim, y_lim=y_lim, z_lim=z_lim).unsqueeze(0).to(self.device)
-                feat_patch = sample_from_planes(self.backbone_3dgan.backbone.renderer.plane_axes, planes_resized, cordinates, box_warp=self.backbone_3dgan.backbone.rendering_kwargs['box_warp']) # [1, 3, n_points, 32]
+                coordinates = point.gen_normed_cube_coordinates(r, x_lim=x_lim, y_lim=y_lim, z_lim=z_lim, device=self.device).unsqueeze(0)
+                feat_patch = sample_from_planes(self.backbone_3dgan.backbone.renderer.plane_axes, planes_resized, coordinates, box_warp=self.backbone_3dgan.backbone.rendering_kwargs['box_warp']) # [1, 3, n_points, 32]
                 feat_patch = feat_patch.squeeze().permute(1, 0, 2).view(-1, 96) # [1, 3, n_points, 32] to [n_points, 96]
                 L2 = torch.linalg.norm(feat_patch - self.planes0_ref[i], dim=-1)
                 _, idx = torch.min(L2.view(1,-1), -1)
-                points_after_step.append(Point(cordinates[0, idx, 0], cordinates[0, idx, 1], cordinates[0, idx, 2]))
+                points_after_step.append(
+                    Point.from_tensor((coordinates[0][idx][0] + 1) / 2 * torch.tensor([x_lim, y_lim, z_lim], device=self.device, dtype=torch.float32))
+                )
 
         assert len(points_cur) == len(points_target), "Number of points should be the same."
 
         finished = True # TODO @botbw: change to tensor
+        loss_motion = 0
         for p_cur, p_tar in zip(points_cur, points_target):
             v_cur_tar = p_tar.to_tensor(self.device) - p_cur.to_tensor(self.device)
             length_v_cur_tar = torch.norm(v_cur_tar)
@@ -192,12 +197,25 @@ class DragStep(nn.Module):
             if length_v_cur_tar > 1:
                 r = round(r1 / 512 * x_lim)
                 e_cur_tar = v_cur_tar / length_v_cur_tar
-                coordinates = p_cur.gen_sphere_coordinates(r, self.device, x_lim, y_lim, z_lim)
-                normed_new_coordinates = (coordinates + e_cur_tar) / torch.tensor([x_lim, y_lim, z_lim], device=self.device) * 2 - 1
+                coordinates_cur = p_cur.gen_normed_sphere_coordinates(r, x_lim=x_lim, y_lim=y_lim, z_lim=z_lim, device=self.device).unsqueeze(0)
+                p_step = p_cur + Point.from_tensor(e_cur_tar)
+                cordinates_step = p_step.gen_normed_sphere_coordinates(r, x_lim=x_lim, y_lim=y_lim, z_lim=z_lim, device=self.device).unsqueeze(0)
+                feat_cur = sample_from_planes(self.backbone_3dgan.backbone.renderer.plane_axes,
+                                       planes_resized,
+                                       coordinates_cur, # _, M, _ = coordinates.shape
+                                       box_warp=self.backbone_3dgan.backbone.    # batch (1), n_points, 3
+                                       rendering_kwargs['box_warp']).detach()
+                feat_step = sample_from_planes(self.backbone_3dgan.backbone.renderer.plane_axes,
+                                        planes_resized,
+                                        cordinates_step, # _, M, _ = coordinates.shape
+                                        box_warp=self.backbone_3dgan.backbone.    # batch (1), n_points, 3
+                                        rendering_kwargs['box_warp'])
+                loss_motion += F.l1_loss(feat_cur, feat_step)
 
-
+        return loss_motion, points_after_step, img
 
 if __name__ == "__main__":
+    seed_everything(10086)
     import pickle
     from eg3d.eg3d.camera_utils import FOV_to_intrinsics, LookAtPoseSampler
     cam2world_pose = LookAtPoseSampler.sample(3.14 / 2,
@@ -211,12 +229,26 @@ if __name__ == "__main__":
     intrinsics = FOV_to_intrinsics(fov_deg, device='cuda')
     with open('ckpts/ffhq512-128.pkl', 'rb') as f:
         G = pickle.load(f)['G_ema'].cuda()  # torch.nn.Module
-    z = torch.randn([1, G.z_dim]).cuda()    # latent codes
+    z = torch.randn([1, G.z_dim]).cuda().requires_grad_(True)    # latent codes
     c = torch.cat([cam2world_pose.reshape(-1, 16),
                 intrinsics.reshape(-1, 9)], 1)  # camera parameters
-    DragStep(wrap_eg3d_backbone(G), torch.device('cuda'))(
-        ws=z,
-        camera_parameters=c,
-        points_cur=[Point(0, 0, 0), Point(1, 1, 1)],
-        points_target=[Point(10, 10, 10), Point(20, 20, 20)],
-    )
+
+    points_cur = [Point(10, 10, 10)] #, Point(101, 101, 101)]
+    opt = torch.optim.SGD([z], lr=0.0001)
+    all_pic = []
+    for step in range(100):
+        loss, points_step, img = DragStep(wrap_eg3d_backbone(G), torch.device('cuda'))(
+            ws=z,
+            camera_parameters=c,
+            points_cur=points_cur,
+            points_target=[Point(300, 300, 300)] #, Point(300, 300, 300)],
+        )
+        print(f'point_cur: {points_cur}, points_step: {points_step}')
+        point_cur = points_step
+        print(f'loss: {loss.item()}, z: {z.mean()}')
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+        save_eg3d_img(img, f'step_{step}.png')
+        all_pic.append(img.detach())
+    print("passed")
