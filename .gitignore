@@ -167,6 +167,8 @@ cython_debug/
 
 # model binary
 ckpts
+*.pkl
+*.zip
 
 # symbolic links
 dnnlib
