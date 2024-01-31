@@ -2,6 +2,7 @@ import torch
 import numpy as np
 import random
 
+
 def seed_everything(seed=42):
     # Set seed for PyTorch
     torch.manual_seed(seed)

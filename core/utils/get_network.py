@@ -4,6 +4,7 @@ from core import PROJ_DIR
 
 import pickle
 
+
 def get_network(pkl_file_path: Union[str, os.PathLike]) -> dict:
     """Get a StyleGAN network from a pkl file."""
     assert os.path.exists(pkl_file_path), f'pkl file {pkl_file_path} does not exist!'
