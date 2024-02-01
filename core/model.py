@@ -192,7 +192,7 @@ class DragStep(nn.Module):
         points_after_step = []
         with torch.no_grad():
             for i, point in enumerate(points_cur):
-                coordinates = point.gen_real_cube_coordinates(r1, r1_step) + random.uniform(-r1_step / 2, r1_step/2)
+                coordinates = point.gen_cube_coordinates(r1, r1_step) + random.uniform(-r1_step / 2, r1_step/2)
                 logging.info(f'Numebr of cube coordinates: {coordinates.shape[0]}, r1: {r1}, r1_step: {r1_step}')
                 feat_patch = sample_from_planes(
                     self.backbone_3dgan.renderer.plane_axes,
@@ -217,18 +217,18 @@ class DragStep(nn.Module):
         for p_cur, p_tar in zip(points_cur, points_target):
             v_cur_tar = p_tar.to_tensor() - p_cur.to_tensor()
             e_cur_tar = v_cur_tar / torch.norm(v_cur_tar)
-            coordinates_cur = p_cur.gen_real_sphere_coordinates(r2, r2_step).unsqueeze(0)
+            coordinates_cur = p_cur.gen_sphere_coordinates(r2, r2_step)
             logging.info(f'Numebr of sphere coordinates: {coordinates_cur.shape[0]}, r2: {r2}, r2_step: {r2_step}')
             coordinates_step = coordinates_cur + e_cur_tar * point_step
             feat_cur = sample_from_planes(
                 self.backbone_3dgan.renderer.plane_axes,
                 planes,
-                coordinates_cur,  # _, M, _ = coordinates.shape
+                coordinates_cur.unsqueeze(0),  # _, M, _ = coordinates.shape
                 box_warp=self.backbone_3dgan.rendering_kwargs['box_warp']).detach()
             feat_step = sample_from_planes(
                 self.backbone_3dgan.renderer.plane_axes,
                 planes,
-                coordinates_step,  # _, M, _ = coordinates.shape
+                coordinates_step.unsqueeze(0),  # _, M, _ = coordinates.shape
                 box_warp=self.backbone_3dgan.rendering_kwargs['box_warp'])
             loss_motion += F.l1_loss(feat_cur, feat_step)
 
