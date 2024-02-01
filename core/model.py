@@ -204,12 +204,9 @@ class DragStep(nn.Module):
                     planes,
                     coordinates.unsqueeze(0),  # _, M, _ = coordinates.shape
                     box_warp=self.backbone_3dgan.rendering_kwargs['box_warp'])
-                # feat_patch = torch.nn.functional.grid_sample(planes, coordinates, mode='bilinear', padding_mode='zeros', align_corners=False).permute(2, 3, 0, 1).squeeze(0)
                 feat_patch = feat_patch.squeeze().permute(1, 0, 2).view(
                     -1, 96)  # [1, 3, n_points, 32] to [n_points, 96]
                 L2 = torch.linalg.norm(feat_patch - self.planes0_ref[i], dim=-1)
-                # _, idxs = torch.topk(-L2.view(-1), 2)
-                # idx = idxs[1]
                 idx = torch.argmin(L2.view(-1))
                 move_vectors.append(coordinates[idx] - point.to_tensor())
                 points_after_step.append(WorldPoint(coordinates[idx]))
@@ -231,13 +228,13 @@ class DragStep(nn.Module):
                 coordinates_step = coordinates_cur + e_cur_tar * torch.norm(move_vectors[i])
             feat_cur = sample_from_planes(
                 self.backbone_3dgan.renderer.plane_axes,
-                planes,
-                coordinates_cur.unsqueeze(0),  # _, M, _ = coordinates.shape
-                box_warp=self.backbone_3dgan.rendering_kwargs['box_warp']).detach()
+                planes.detach(),
+                coordinates_cur.unsqueeze(0),
+                box_warp=self.backbone_3dgan.rendering_kwargs['box_warp'])
             feat_step = sample_from_planes(
                 self.backbone_3dgan.renderer.plane_axes,
                 planes,
-                coordinates_step.unsqueeze(0),  # _, M, _ = coordinates.shape
+                coordinates_step.unsqueeze(0),
                 box_warp=self.backbone_3dgan.rendering_kwargs['box_warp'])
             loss_motion += F.l1_loss(feat_cur, feat_step)
 
@@ -272,8 +269,10 @@ if __name__ == "__main__":
     model = DragStep(wrap_eg3d_backbone(G), torch.device('cuda'))
 
     z = torch.randn([1, G.z_dim]).cuda()
-    ws = model.init_ws(z, c)
-    ws = ws.detach().requires_grad_(True)
+
+    ws0 = model.init_ws(z, c).detach()
+    ws = ws0.detach().clone().requires_grad_(True)
+
     gen_mesh_ply('output/mesh_start.ply', G, ws.detach(), mesh_res=256)
     opt = torch.optim.SGD([ws], lr=0.01)
     # eg3d/eg3d/gen_samples.py::create_samples
@@ -281,7 +280,10 @@ if __name__ == "__main__":
     points_target = [WorldPoint(torch.tensor([0.5, 0, 0.5], device='cuda'))]
 
     for step in range(200):
-        loss, points_step, img, img_depth = model(ws=ws,
+        assert torch.allclose(ws[:, 6:,:], ws0[:,6:,:])
+        assert not (step != 0 and torch.allclose(ws[:, :6, :], ws0[:, :6, :]))
+        ws_input = torch.cat([ws[:,:6,:], ws0[:,6:,:]], dim=1)
+        loss, points_step, img, img_depth = model(ws=ws_input,
                                                   camera_parameters=c,
                                                   points_cur=points_cur,
                                                   points_target=points_target)
