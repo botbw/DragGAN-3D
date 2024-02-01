@@ -11,18 +11,6 @@ CUBE_LIM = 1.0
 class WorldPoint:
     data: torch.Tensor
 
-    @property
-    def x(self) -> float:
-        return self.data[0].item()
-
-    @property
-    def y(self) -> float:
-        return self.data[1].item()
-
-    @property
-    def z(self) -> float:
-        return self.data[2].item()
-
     def __init__(self, point: torch.Tensor):
         assert isinstance(point,
                           torch.Tensor), f'point has to be of type torch.Tensor, got {type(point)}'
@@ -65,10 +53,10 @@ class WorldPoint:
                                 device: torch.device) -> torch.Tensor:
         assert point.shape == (2, )
         x, y = point.tolist()
-        x_min = max(-CUBE_LIM, self.x - radius)
-        x_max = min(CUBE_LIM, self.x + radius)
-        y_min = max(-CUBE_LIM, self.y - radius)
-        y_max = min(CUBE_LIM, self.y + radius)
+        x_min = max(-CUBE_LIM, x - radius)
+        x_max = min(CUBE_LIM, x + radius)
+        y_min = max(-CUBE_LIM, y - radius)
+        y_max = min(CUBE_LIM, y + radius)
         x_span = torch.arange(x_min, x_max, step=step, device=device)
         y_span = torch.arange(y_min, y_max, step=step, device=device)
         xx, yy = torch.meshgrid(x_span, y_span)
@@ -98,10 +86,10 @@ class WorldPoint:
         device: torch.device = torch.device('cuda')) -> torch.Tensor:
         assert point.shape == (2, )
         x, y = point.tolist()
-        x_min = max(-CUBE_LIM, self.x - half_l)
-        x_max = min(CUBE_LIM, self.x + half_l)
-        y_min = max(-CUBE_LIM, self.y - half_l)
-        y_max = min(CUBE_LIM, self.y + half_l)
+        x_min = max(-CUBE_LIM, x - half_l)
+        x_max = min(CUBE_LIM, x + half_l) + step
+        y_min = max(-CUBE_LIM, y - half_l)
+        y_max = min(CUBE_LIM, y + half_l) + step
         x_span = torch.arange(x_min, x_max, step=step, device=device)
         y_span = torch.arange(y_min, y_max, step=step, device=device)
         xx, yy = torch.meshgrid(x_span, y_span)
@@ -110,30 +98,32 @@ class WorldPoint:
 
     @torch.no_grad
     def gen_sphere_coordinates(self, radius: float, step: float) -> torch.Tensor:
-        x_min = max(-CUBE_LIM, self.x - radius)
-        x_max = min(CUBE_LIM, self.x + radius)
-        y_min = max(-CUBE_LIM, self.y - radius)
-        y_max = min(CUBE_LIM, self.y + radius)
-        z_min = max(-CUBE_LIM, self.z - radius)
-        z_max = min(CUBE_LIM, self.z + radius)
+        x, y, z = self.data.tolist()
+        x_min = max(-CUBE_LIM, x - radius)
+        x_max = min(CUBE_LIM, x + radius) + step
+        y_min = max(-CUBE_LIM, y - radius)
+        y_max = min(CUBE_LIM, y + radius) + step
+        z_min = max(-CUBE_LIM, z - radius)
+        z_max = min(CUBE_LIM, z + radius) + step
         x_span = torch.arange(x_min, x_max, step=step, device=self.data.device)
         y_span = torch.arange(y_min, y_max, step=step, device=self.data.device)
         z_span = torch.arange(z_min, z_max, step=step, device=self.data.device)
         xx, yy, zz = torch.meshgrid(x_span, y_span, z_span)
         xx, yy, zz = xx.flatten(), yy.flatten(), zz.flatten()
-        inside_sphere = (xx - self.x)**2 + (yy - self.y)**2 + \
-            (zz - self.z)**2 <= radius**2
+        inside_sphere = (xx - x)**2 + (yy - y)**2 + \
+            (zz - z)**2 <= radius**2
         coordinates = torch.stack((xx[inside_sphere], yy[inside_sphere], zz[inside_sphere]), dim=1)
         return coordinates
 
     @torch.no_grad
     def gen_cube_coordinates(self, half_l: float, step: float) -> torch.Tensor:
-        x_min = max(-CUBE_LIM, self.x - half_l)
-        x_max = min(CUBE_LIM, self.x + half_l)
-        y_min = max(-CUBE_LIM, self.y - half_l)
-        y_max = min(CUBE_LIM, self.y + half_l)
-        z_min = max(-CUBE_LIM, self.z - half_l)
-        z_max = min(CUBE_LIM, self.z + half_l)
+        x, y, z = self.data.tolist()
+        x_min = max(-CUBE_LIM, x - half_l)
+        x_max = min(CUBE_LIM, x + half_l) + step
+        y_min = max(-CUBE_LIM, y - half_l)
+        y_max = min(CUBE_LIM, y + half_l) + step
+        z_min = max(-CUBE_LIM, z - half_l)
+        z_max = min(CUBE_LIM, z + half_l) + step
         x_span = torch.arange(x_min, x_max, step=step, device=self.data.device)
         y_span = torch.arange(y_min, y_max, step=step, device=self.data.device)
         z_span = torch.arange(z_min, z_max, step=step, device=self.data.device)

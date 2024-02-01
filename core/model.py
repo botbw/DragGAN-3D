@@ -148,8 +148,6 @@ class DragStep(nn.Module):
         self.init_run = False
         self.planes0_ref = None
 
-        self.plane_his = []
-
     def init_ws(self, z, camera_parameters):
         ws, synthesised = self.backbone_3dgan(z, camera_parameters)
         self.synthesised = synthesised
@@ -167,11 +165,11 @@ class DragStep(nn.Module):
                 camera_parameters: torch.Tensor,
                 points_cur: List[WorldPoint],
                 points_target: List[WorldPoint],
-                point_step: float = 0.01,
-                r1: float = 0.1,
-                r1_step: float = 0.05,
+                # point_step: float = 1,
+                r1: float = 0.03,
+                r1_step: float = 0.003,
                 r2: float = 0.1,
-                r2_step: float = 0.05,
+                r2_step: float = 0.01,
                 mask: Optional[torch.Tensor] = None):
         assert self.init_run, "Please call init_ws() first to get ws"
         assert len(points_cur) == len(points_target), "Number of points should be the same."
@@ -182,18 +180,18 @@ class DragStep(nn.Module):
 
         if self.planes0_ref is None:
             points_feat = []
-            for point in points_cur:  # TODO @botbw: decouple from eg3d and simplify this
+            for p_cur in points_cur:  # TODO @botbw: decouple from eg3d and simplify this
                 feat = sample_from_planes(
                     self.backbone_3dgan.renderer.plane_axes,
                     planes,
-                    point.to_tensor().unsqueeze(0).unsqueeze(0),  # _, M, _ = coordinates.shape
+                    p_cur.to_tensor().unsqueeze(0).unsqueeze(0),  # _, M, _ = coordinates.shape
                     box_warp=self.backbone_3dgan.rendering_kwargs['box_warp'])
                 points_feat.append(feat.reshape(96))  # feat: [1, 3, 1, 32]
             self.planes0_ref = torch.stack(points_feat, dim=0)
 
-        self.plane_his.append(planes.detach())
         # Point tracking with feature matching
         points_after_step = []
+        move_vectors = []
         with torch.no_grad():
             for i, point in enumerate(points_cur):
                 coordinates = point.gen_cube_coordinates(r1, r1_step) + random.uniform(
@@ -213,10 +211,11 @@ class DragStep(nn.Module):
                 # _, idxs = torch.topk(-L2.view(-1), 2)
                 # idx = idxs[1]
                 idx = torch.argmin(L2.view(-1))
-                logging.info(f'move distance: {torch.norm(coordinates[idx] - point.to_tensor())}')
+                move_vectors.append(coordinates[idx] - point.to_tensor())
+                points_after_step.append(WorldPoint(coordinates[idx]))
+                logging.info(f'Move vector: {move_vectors[i]}, distance: {torch.norm(move_vectors[i])}')
                 if torch.allclose(coordinates[idx], point.to_tensor()):
                     logging.warning(f'Point {point} is not moving.')
-                points_after_step.append(WorldPoint(coordinates[idx]))
 
         assert len(points_cur) == len(points_target), "Number of points should be the same."
 
@@ -224,11 +223,12 @@ class DragStep(nn.Module):
         for p_cur, p_tar in zip(points_cur, points_target):
             v_cur_tar = p_tar.to_tensor() - p_cur.to_tensor()
             e_cur_tar = v_cur_tar / torch.norm(v_cur_tar)
-            coordinates_cur = p_cur.gen_sphere_coordinates(r2, r2_step)
-            logging.info(
-                f'Numebr of sphere coordinates: {coordinates_cur.shape[0]}, r2: {r2}, r2_step: {r2_step}'
-            )
-            coordinates_step = coordinates_cur + e_cur_tar * point_step
+            with torch.no_grad():
+                coordinates_cur = p_cur.gen_sphere_coordinates(r2, r2_step)
+                logging.info(
+                    f'Numebr of sphere coordinates: {coordinates_cur.shape[0]}, r2: {r2}, r2_step: {r2_step}'
+                )
+                coordinates_step = coordinates_cur + e_cur_tar * torch.norm(move_vectors[i])
             feat_cur = sample_from_planes(
                 self.backbone_3dgan.renderer.plane_axes,
                 planes,
@@ -280,12 +280,12 @@ if __name__ == "__main__":
     points_cur = [WorldPoint(torch.tensor([0, 0, 0.2], device='cuda'))]
     points_target = [WorldPoint(torch.tensor([0.5, 0, 0.5], device='cuda'))]
 
-    for step in range(100):
+    for step in range(200):
         loss, points_step, img, img_depth = model(ws=ws,
                                                   camera_parameters=c,
                                                   points_cur=points_cur,
                                                   points_target=points_target)
-        logging.info(f'points_cur: {points_cur}, points_step: {points_step}')
+        # logging.info(f'points_cur: {points_cur}, points_step: {points_step}')
         points_cur = points_step
         logging.info(f'loss: {loss.item()}, ws: {ws.mean()}')
         opt.zero_grad()
@@ -295,5 +295,6 @@ if __name__ == "__main__":
             save_eg3d_img(img, f'output/step_{step}.png')
             # gen_mesh_ply(f'output/mesh_{step}.ply', model.backbone_3dgan, ws.detach(), mesh_res=256)
 
+    logging.info(f'points_end: {points_cur}')
     gen_mesh_ply(f'output/mesh_end.ply', model.backbone_3dgan, ws.detach(), mesh_res=256)
     print("passed")
