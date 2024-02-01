@@ -8,10 +8,12 @@ import torch.nn.functional as F
 from eg3d.eg3d.training.triplane import TriPlaneGenerator
 from training.volumetric_rendering.renderer import sample_from_planes, project_onto_planes
 from core.utils import *
+from core.log import *
+from core.gen_mesh_ply import *
 import math
 import numpy as np
 from training.volumetric_rendering import math_utils
-
+import logging
 
 def wrap_eg3d_backbone(backbone: TriPlaneGenerator) -> nn.Module:
     # modified from eg3d/eg3d/training/triplane.py
@@ -116,8 +118,15 @@ def wrap_eg3d_backbone(backbone: TriPlaneGenerator) -> nn.Module:
                                   use_cached_backbone=use_cached_backbone,
                                   **synthesis_kwargs)
 
+    def sample_using_ws(self, coordinates, directions, ws, update_emas=False, **synthesis_kwargs):
+        # Compute RGB features, density for arbitrary 3D coordinates. Mostly used for extracting shapes. 
+        planes = self.backbone.synthesis(ws, update_emas=update_emas, **synthesis_kwargs)
+        planes = planes.view(len(planes), 3, 32, planes.shape[-2], planes.shape[-1])
+        return self.renderer.run_model(planes, self.decoder, coordinates, directions, self.rendering_kwargs)
+
     backbone.synthesis = partial(synthesis, backbone)
     backbone.forward = partial(forward, backbone)
+    backbone.sample_using_ws = partial(sample_using_ws, backbone)
 
     return backbone
 
@@ -135,6 +144,8 @@ class DragStep(nn.Module):
         self.forward_initialezed = False
         self.init_run = False
         self.planes0_ref = None
+
+        self.plane_his = []
 
     def init_ws(self, z, camera_parameters):
         ws, synthesised = self.backbone_3dgan(z, camera_parameters)
@@ -154,10 +165,10 @@ class DragStep(nn.Module):
                 points_cur: List[WorldPoint],
                 points_target: List[WorldPoint],
                 point_step: float = 0.01,
-                r1: float = 0.03,
-                r1_step: float = 0.01,
-                r2: float = 0.012,
-                r2_step: float = 0.01,
+                r1: float = 0.1,
+                r1_step: float = 0.05,
+                r2: float = 0.1,
+                r2_step: float = 0.05,
                 mask: Optional[torch.Tensor] = None):
         assert self.init_run, "Please call init_ws() first to get ws"
         assert len(points_cur) == len(points_target), "Number of points should be the same."
@@ -176,11 +187,13 @@ class DragStep(nn.Module):
                 points_feat.append(feat.reshape(96))  # feat: [1, 3, 1, 32]
             self.planes0_ref = torch.stack(points_feat, dim=0)
 
+        self.plane_his.append(planes.detach())
         # Point tracking with feature matching
         points_after_step = []
         with torch.no_grad():
             for i, point in enumerate(points_cur):
-                coordinates = point.gen_real_cube_coordinates(r1, r1_step)
+                coordinates = point.gen_real_cube_coordinates(r1, r1_step) + random.uniform(-r1_step / 2, r1_step/2)
+                logging.info(f'Numebr of cube coordinates: {coordinates.shape[0]}, r1: {r1}, r1_step: {r1_step}')
                 feat_patch = sample_from_planes(
                     self.backbone_3dgan.renderer.plane_axes,
                     planes,
@@ -190,7 +203,12 @@ class DragStep(nn.Module):
                 feat_patch = feat_patch.squeeze().permute(1, 0, 2).view(
                     -1, 96)  # [1, 3, n_points, 32] to [n_points, 96]
                 L2 = torch.linalg.norm(feat_patch - self.planes0_ref[i], dim=-1)
-                idx = torch.argmin(L2.view(1, -1), -1).item()
+                # _, idxs = torch.topk(-L2.view(-1), 2)
+                # idx = idxs[1]
+                idx = torch.argmin(L2.view(-1))
+                logging.info(f'move distance: {torch.norm(coordinates[idx] - point.to_tensor())}')
+                if torch.allclose(coordinates[idx], point.to_tensor()):
+                    logging.warning(f'Point {point} is not moving.')
                 points_after_step.append(WorldPoint(coordinates[idx]))
 
         assert len(points_cur) == len(points_target), "Number of points should be the same."
@@ -200,6 +218,7 @@ class DragStep(nn.Module):
             v_cur_tar = p_tar.to_tensor() - p_cur.to_tensor()
             e_cur_tar = v_cur_tar / torch.norm(v_cur_tar)
             coordinates_cur = p_cur.gen_real_sphere_coordinates(r2, r2_step).unsqueeze(0)
+            logging.info(f'Numebr of sphere coordinates: {coordinates_cur.shape[0]}, r2: {r2}, r2_step: {r2_step}')
             coordinates_step = coordinates_cur + e_cur_tar * point_step
             feat_cur = sample_from_planes(
                 self.backbone_3dgan.renderer.plane_axes,
@@ -221,6 +240,7 @@ if __name__ == "__main__":
     from eg3d.eg3d.camera_utils import FOV_to_intrinsics, LookAtPoseSampler
 
     seed_everything(100861)
+    setup_logger(logging.INFO)
 
     with open('ckpts/ffhq-fixed-triplane512-128.pkl', 'rb') as f:
         G = pickle.load(f)['G_ema'].cuda()  # torch.nn.Module
@@ -245,20 +265,27 @@ if __name__ == "__main__":
     z = torch.randn([1, G.z_dim]).cuda()
     ws = model.init_ws(z, c)
     ws = ws.detach().requires_grad_(True)
-    opt = torch.optim.SGD([ws], lr=0.1)
-    points_cur = [model.convert_pixel_to_points(64, 64)]
-    points_target = [model.convert_pixel_to_points(127, 127)]
+    gen_mesh_ply('output/mesh_start.ply', G, ws.detach(), mesh_res=256)
+    opt = torch.optim.SGD([ws], lr=0.01)
+    # eg3d/eg3d/gen_samples.py::create_samples
+    points_cur = [WorldPoint(torch.tensor([0, 0, 0.2], device='cuda'))]
+    points_target = [WorldPoint(torch.tensor([0.5, 0, 0.5], device='cuda'))]
 
-    for step in range(10):
+    for step in range(100):
         loss, points_step, img, img_depth = model(ws=ws,
                                                   camera_parameters=c,
                                                   points_cur=points_cur,
                                                   points_target=points_target)
-        print(f'points_cur: {points_cur}, points_step: {points_step}')
+        logging.info(f'points_cur: {points_cur}, points_step: {points_step}')
         points_cur = points_step
-        print(f'loss: {loss.item()}, ws: {ws.mean()}')
+        logging.info(f'loss: {loss.item()}, ws: {ws.mean()}')
         opt.zero_grad()
         loss.backward()
         opt.step()
-        save_eg3d_img(img, f'step_{step}.png')
+        if step % 10 == 0:
+            save_eg3d_img(img, f'output/step_{step}.png')
+            # gen_mesh_ply(f'output/mesh_{step}.ply', model.backbone_3dgan, ws.detach(), mesh_res=256)
+    
+    gen_mesh_ply(f'output/mesh_end.ply', model.backbone_3dgan, ws.detach(), mesh_res=256)
     print("passed")
+

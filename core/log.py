@@ -2,7 +2,7 @@ import logging
 import colorlog
 
 
-def setup_logger():
+def setup_logger(level):
     # colored log
     log_format = ("[%(log_color)s%(levelname)s%(reset)s] "
                   "%(log_color)s%(message)s"
@@ -17,7 +17,7 @@ def setup_logger():
     formatter = colorlog.ColoredFormatter(log_format, log_colors=log_colors)
 
     logger = logging.getLogger()
-    logger.setLevel(logging.ERROR)
+    logger.setLevel(level)
 
     stream_handler = logging.StreamHandler()
     stream_handler.setFormatter(formatter)
