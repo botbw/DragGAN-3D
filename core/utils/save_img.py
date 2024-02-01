@@ -51,7 +51,8 @@ def save_3d_depth_img(img_depth, path: str = 'depth_img.jpg'):
     hf = plt.figure()
     ha = hf.add_subplot(111, projection='3d')
 
-    X, Y = numpy.meshgrid(x, y)  # `plot_surface` expects `x` and `y` data to be 2D
+    # `plot_surface` expects `x` and `y` data to be 2D
+    X, Y = numpy.meshgrid(x, y)
     ha.plot_surface(X, Y, img_depth)
 
     plt.savefig(path)

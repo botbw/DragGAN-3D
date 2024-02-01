@@ -6,6 +6,7 @@ _PLANES = generate_planes().to('cuda')  # TODO @botbw: remove this
 
 CUBE_LIM = 1.0
 
+
 # @dataclass
 class WorldPoint:
     data: torch.Tensor
@@ -120,7 +121,8 @@ class WorldPoint:
         z_span = torch.arange(z_min, z_max, step=step, device=self.data.device)
         xx, yy, zz = torch.meshgrid(x_span, y_span, z_span)
         xx, yy, zz = xx.flatten(), yy.flatten(), zz.flatten()
-        inside_sphere = (xx - self.x)**2 + (yy - self.y)**2 + (zz - self.z)**2 <= radius**2
+        inside_sphere = (xx - self.x)**2 + (yy - self.y)**2 + \
+            (zz - self.z)**2 <= radius**2
         coordinates = torch.stack((xx[inside_sphere], yy[inside_sphere], zz[inside_sphere]), dim=1)
         return coordinates
 

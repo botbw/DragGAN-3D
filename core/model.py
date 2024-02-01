@@ -15,6 +15,7 @@ import numpy as np
 from training.volumetric_rendering import math_utils
 import logging
 
+
 def wrap_eg3d_backbone(backbone: TriPlaneGenerator) -> nn.Module:
     # modified from eg3d/eg3d/training/triplane.py
     def synthesis(self,
@@ -119,10 +120,12 @@ def wrap_eg3d_backbone(backbone: TriPlaneGenerator) -> nn.Module:
                                   **synthesis_kwargs)
 
     def sample_using_ws(self, coordinates, directions, ws, update_emas=False, **synthesis_kwargs):
-        # Compute RGB features, density for arbitrary 3D coordinates. Mostly used for extracting shapes. 
+        # Compute RGB features, density for arbitrary 3D coordinates. Mostly
+        # used for extracting shapes.
         planes = self.backbone.synthesis(ws, update_emas=update_emas, **synthesis_kwargs)
         planes = planes.view(len(planes), 3, 32, planes.shape[-2], planes.shape[-1])
-        return self.renderer.run_model(planes, self.decoder, coordinates, directions, self.rendering_kwargs)
+        return self.renderer.run_model(planes, self.decoder, coordinates, directions,
+                                       self.rendering_kwargs)
 
     backbone.synthesis = partial(synthesis, backbone)
     backbone.forward = partial(forward, backbone)
@@ -174,7 +177,8 @@ class DragStep(nn.Module):
         assert len(points_cur) == len(points_target), "Number of points should be the same."
 
         synthesised = self.backbone_3dgan.synthesis(ws, camera_parameters)
-        img, planes = synthesised['image'], synthesised['planes']  # planes (3, 32, 256, 256)
+        # planes (3, 32, 256, 256)
+        img, planes = synthesised['image'], synthesised['planes']
 
         if self.planes0_ref is None:
             points_feat = []
@@ -192,8 +196,11 @@ class DragStep(nn.Module):
         points_after_step = []
         with torch.no_grad():
             for i, point in enumerate(points_cur):
-                coordinates = point.gen_cube_coordinates(r1, r1_step) + random.uniform(-r1_step / 2, r1_step/2)
-                logging.info(f'Numebr of cube coordinates: {coordinates.shape[0]}, r1: {r1}, r1_step: {r1_step}')
+                coordinates = point.gen_cube_coordinates(r1, r1_step) + random.uniform(
+                    -r1_step / 2, r1_step / 2)
+                logging.info(
+                    f'Numebr of cube coordinates: {coordinates.shape[0]}, r1: {r1}, r1_step: {r1_step}'
+                )
                 feat_patch = sample_from_planes(
                     self.backbone_3dgan.renderer.plane_axes,
                     planes,
@@ -218,7 +225,9 @@ class DragStep(nn.Module):
             v_cur_tar = p_tar.to_tensor() - p_cur.to_tensor()
             e_cur_tar = v_cur_tar / torch.norm(v_cur_tar)
             coordinates_cur = p_cur.gen_sphere_coordinates(r2, r2_step)
-            logging.info(f'Numebr of sphere coordinates: {coordinates_cur.shape[0]}, r2: {r2}, r2_step: {r2_step}')
+            logging.info(
+                f'Numebr of sphere coordinates: {coordinates_cur.shape[0]}, r2: {r2}, r2_step: {r2_step}'
+            )
             coordinates_step = coordinates_cur + e_cur_tar * point_step
             feat_cur = sample_from_planes(
                 self.backbone_3dgan.renderer.plane_axes,
@@ -285,7 +294,6 @@ if __name__ == "__main__":
         if step % 10 == 0:
             save_eg3d_img(img, f'output/step_{step}.png')
             # gen_mesh_ply(f'output/mesh_{step}.ply', model.backbone_3dgan, ws.detach(), mesh_res=256)
-    
+
     gen_mesh_ply(f'output/mesh_end.ply', model.backbone_3dgan, ws.detach(), mesh_res=256)
     print("passed")
-
