@@ -30,7 +30,7 @@ class WorldPoint:
     def __repr__(self) -> str:
         x, y, z = self.data.tolist()
         cls_name = self.__class__.__name__
-        return f'{cls_name}(x={x}, y={y}, z={z})'
+        return f'{cls_name}(x={x:.4f}, y={y:.4f}, z={z:.4f})'
 
     def to_tensor(self) -> torch.Tensor:
         return self.data

@@ -17,8 +17,62 @@ import logging
 
 
 def wrap_eg3d_backbone(backbone: TriPlaneGenerator) -> nn.Module:
+    def renderer_forward(self, planes, decoder, ray_origins, ray_directions, rendering_options):
+        self.plane_axes = self.plane_axes.to(ray_origins.device)
+
+        if rendering_options['ray_start'] == rendering_options['ray_end'] == 'auto':
+            ray_start, ray_end = math_utils.get_ray_limits_box(ray_origins, ray_directions, box_side_length=rendering_options['box_warp'])
+            is_ray_valid = ray_end > ray_start
+            if torch.any(is_ray_valid).item():
+                ray_start[~is_ray_valid] = ray_start[is_ray_valid].min()
+                ray_end[~is_ray_valid] = ray_start[is_ray_valid].max()
+            depths_coarse = self.sample_stratified(ray_origins, ray_start, ray_end, rendering_options['depth_resolution'], rendering_options['disparity_space_sampling'])
+        else:
+            # Create stratified depth samples
+            depths_coarse = self.sample_stratified(ray_origins, rendering_options['ray_start'], rendering_options['ray_end'], rendering_options['depth_resolution'], rendering_options['disparity_space_sampling'])
+
+        batch_size, num_rays, samples_per_ray, _ = depths_coarse.shape
+
+        # Coarse Pass
+        sample_coordinates = (ray_origins.unsqueeze(-2) + depths_coarse * ray_directions.unsqueeze(-2)).reshape(batch_size, -1, 3)
+        sample_directions = ray_directions.unsqueeze(-2).expand(-1, -1, samples_per_ray, -1).reshape(batch_size, -1, 3)
+
+
+        out = self.run_model(planes, decoder, sample_coordinates, sample_directions, rendering_options)
+        colors_coarse = out['rgb']
+        densities_coarse = out['sigma']
+        colors_coarse = colors_coarse.reshape(batch_size, num_rays, samples_per_ray, colors_coarse.shape[-1])
+        densities_coarse = densities_coarse.reshape(batch_size, num_rays, samples_per_ray, 1)
+
+        # Fine Pass
+        N_importance = rendering_options['depth_resolution_importance']
+        if N_importance > 0:
+            _, _, weights = self.ray_marcher(colors_coarse, densities_coarse, depths_coarse, rendering_options)
+
+            depths_fine = self.sample_importance(depths_coarse, weights, N_importance)
+
+            sample_directions = ray_directions.unsqueeze(-2).expand(-1, -1, N_importance, -1).reshape(batch_size, -1, 3)
+            sample_coordinates = (ray_origins.unsqueeze(-2) + depths_fine * ray_directions.unsqueeze(-2)).reshape(batch_size, -1, 3)
+
+            out = self.run_model(planes, decoder, sample_coordinates, sample_directions, rendering_options)
+            colors_fine = out['rgb']
+            densities_fine = out['sigma']
+            colors_fine = colors_fine.reshape(batch_size, num_rays, N_importance, colors_fine.shape[-1])
+            densities_fine = densities_fine.reshape(batch_size, num_rays, N_importance, 1)
+
+            all_depths, all_colors, all_densities = self.unify_samples(depths_coarse, colors_coarse, densities_coarse,
+                                                                  depths_fine, colors_fine, densities_fine)
+
+            # Aggregate
+            rgb_final, depth_final, weights = self.ray_marcher(all_colors, all_densities, all_depths, rendering_options)
+        else:
+            rgb_final, depth_final, weights = self.ray_marcher(colors_coarse, densities_coarse, depths_coarse, rendering_options)
+
+
+        return rgb_final, depth_final, weights.sum(2), sample_coordinates
+
     # modified from eg3d/eg3d/training/triplane.py
-    def synthesis(self,
+    def backbone_synthesis(self,
                   ws,
                   c,
                   neural_rendering_resolution=None,
@@ -61,7 +115,7 @@ def wrap_eg3d_backbone(backbone: TriPlaneGenerator) -> nn.Module:
         #     for j in range(cor.shape[1]):
         #         planes[0, i, :, cor[i, j, 0], cor[i, j, 1]] = 0
         #################
-        feature_samples, depth_samples, weights_samples = self.renderer(
+        feature_samples, depth_samples, weights_samples, sampled_coordinates = self.renderer(
             planes, self.decoder, ray_origins, ray_directions,
             self.rendering_kwargs)  # channels last
 
@@ -93,9 +147,10 @@ def wrap_eg3d_backbone(backbone: TriPlaneGenerator) -> nn.Module:
             'planes': planes,
             'ray_origins_image': ray_origins_image[0, 0],
             'ray_directions_image': ray_directions_image,
+            'sampled_coordinates': sampled_coordinates
         }
 
-    def forward(self,
+    def backbone_forward(self,
                 z,
                 c,
                 truncation_psi=1,
@@ -127,8 +182,9 @@ def wrap_eg3d_backbone(backbone: TriPlaneGenerator) -> nn.Module:
         return self.renderer.run_model(planes, self.decoder, coordinates, directions,
                                        self.rendering_kwargs)
 
-    backbone.synthesis = partial(synthesis, backbone)
-    backbone.forward = partial(forward, backbone)
+    backbone.synthesis = partial(backbone_synthesis, backbone)
+    backbone.forward = partial(backbone_forward, backbone)
+    backbone.renderer.forward = partial(renderer_forward, backbone.renderer)
     backbone.sample_using_ws = partial(sample_using_ws, backbone)
 
     return backbone
@@ -146,7 +202,8 @@ class DragStep(nn.Module):
         self.backbone_3dgan = backbone_3dgan.to(device)
         self.forward_initialezed = False
         self.init_run = False
-        self.planes0_ref = None
+        self.planes0_points_ref = None
+        self.planes0 = None
 
     def init_ws(self, z, camera_parameters):
         ws, synthesised = self.backbone_3dgan(z, camera_parameters)
@@ -166,10 +223,10 @@ class DragStep(nn.Module):
                 points_cur: List[WorldPoint],
                 points_target: List[WorldPoint],
                 # point_step: float = 1,
-                r1: float = 0.03,
-                r1_step: float = 0.003,
-                r2: float = 0.1,
-                r2_step: float = 0.01,
+                r1: float = (2 / 256) * 10, # 3 pixels
+                r1_step: float = (2 / 256),
+                r2: float = (2 / 256) * 20, # 12 pixels
+                r2_step: float = (2 / 256),
                 mask: Optional[torch.Tensor] = None):
         assert self.init_run, "Please call init_ws() first to get ws"
         assert len(points_cur) == len(points_target), "Number of points should be the same."
@@ -178,7 +235,9 @@ class DragStep(nn.Module):
         # planes (3, 32, 256, 256)
         img, planes = synthesised['image'], synthesised['planes']
 
-        if self.planes0_ref is None:
+        if self.planes0_points_ref is None:
+            assert self.planes0 is None
+            self.planes0 = planes.detach()
             points_feat = []
             for p_cur in points_cur:  # TODO @botbw: decouple from eg3d and simplify this
                 feat = sample_from_planes(
@@ -187,7 +246,7 @@ class DragStep(nn.Module):
                     p_cur.to_tensor().unsqueeze(0).unsqueeze(0),  # _, M, _ = coordinates.shape
                     box_warp=self.backbone_3dgan.rendering_kwargs['box_warp'])
                 points_feat.append(feat.reshape(96))  # feat: [1, 3, 1, 32]
-            self.planes0_ref = torch.stack(points_feat, dim=0)
+            self.planes0_points_ref = torch.stack(points_feat, dim=0)
 
         # Point tracking with feature matching
         points_after_step = []
@@ -195,7 +254,7 @@ class DragStep(nn.Module):
         with torch.no_grad():
             for i, point in enumerate(points_cur):
                 coordinates = point.gen_cube_coordinates(r1, r1_step) + random.uniform(
-                    -r1_step / 2, r1_step / 2)
+                    -r1_step / 2, r1_step / 2) # random shift
                 logging.info(
                     f'Numebr of cube coordinates: {coordinates.shape[0]}, r1: {r1}, r1_step: {r1_step}'
                 )
@@ -203,10 +262,8 @@ class DragStep(nn.Module):
                     self.backbone_3dgan.renderer.plane_axes,
                     planes,
                     coordinates.unsqueeze(0),  # _, M, _ = coordinates.shape
-                    box_warp=self.backbone_3dgan.rendering_kwargs['box_warp'])
-                feat_patch = feat_patch.squeeze().permute(1, 0, 2).view(
-                    -1, 96)  # [1, 3, n_points, 32] to [n_points, 96]
-                L2 = torch.linalg.norm(feat_patch - self.planes0_ref[i], dim=-1)
+                    box_warp=self.backbone_3dgan.rendering_kwargs['box_warp']).squeeze().permute(1, 0, 2).view(-1, 96)
+                L2 = torch.linalg.norm(feat_patch - self.planes0_points_ref[i], dim=-1)
                 idx = torch.argmin(L2.view(-1))
                 move_vectors.append(coordinates[idx] - point.to_tensor())
                 points_after_step.append(WorldPoint(coordinates[idx]))
@@ -225,7 +282,7 @@ class DragStep(nn.Module):
                 logging.info(
                     f'Numebr of sphere coordinates: {coordinates_cur.shape[0]}, r2: {r2}, r2_step: {r2_step}'
                 )
-                coordinates_step = coordinates_cur + e_cur_tar * torch.norm(move_vectors[i])
+                coordinates_step = coordinates_cur + e_cur_tar * (2 / 256) # one pixel shift
             feat_cur = sample_from_planes(
                 self.backbone_3dgan.renderer.plane_axes,
                 planes.detach(),
@@ -238,6 +295,25 @@ class DragStep(nn.Module):
                 box_warp=self.backbone_3dgan.rendering_kwargs['box_warp'])
             loss_motion += F.l1_loss(feat_cur, feat_step)
 
+        assert mask is None, "customized mask not supported yet."
+
+        if mask is None:
+            for point in points_cur:
+                dis_mask = (synthesised['sampled_coordinates'] - point.to_tensor()).norm(dim=-1) < 0.05
+                if mask is None:
+                    mask = dis_mask
+                else:
+                    mask = mask | dis_mask
+
+        masked_coord = torch.masked_select(synthesised['sampled_coordinates'], mask.unsqueeze(-1).expand(-1, -1, 3)).reshape(-1, 3)
+        logging.info(f'Number of masked coordinates: {masked_coord.shape[0]}')
+        mask_loss =  F.l1_loss(
+            sample_from_planes(self.backbone_3dgan.renderer.plane_axes, self.planes0, masked_coord.unsqueeze(0),
+                                 box_warp=self.backbone_3dgan.rendering_kwargs['box_warp']),
+            sample_from_planes(self.backbone_3dgan.renderer.plane_axes, planes, masked_coord.unsqueeze(0),
+                                 box_warp=self.backbone_3dgan.rendering_kwargs['box_warp'])
+        )
+        loss_motion += mask_loss
         return loss_motion, points_after_step, img, synthesised['depth_image']
 
 
@@ -275,11 +351,12 @@ if __name__ == "__main__":
 
     gen_mesh_ply('output/mesh_start.ply', G, ws.detach(), mesh_res=256)
     opt = torch.optim.SGD([ws], lr=0.01)
-    # eg3d/eg3d/gen_samples.py::create_samples
-    points_cur = [WorldPoint(torch.tensor([0, 0, 0.2], device='cuda'))]
-    points_target = [WorldPoint(torch.tensor([0.5, 0, 0.5], device='cuda'))]
 
-    for step in range(200):
+    points_cur = [WorldPoint(torch.tensor([0, 0, 0.26], device='cuda'))]
+    points_target = [WorldPoint(torch.tensor([0, 0, 0.5], device='cuda'))]
+
+
+    for step in range(1000):
         assert torch.allclose(ws[:, 6:,:], ws0[:,6:,:])
         assert not (step != 0 and torch.allclose(ws[:, :6, :], ws0[:, :6, :]))
         ws_input = torch.cat([ws[:,:6,:], ws0[:,6:,:]], dim=1)
@@ -287,15 +364,17 @@ if __name__ == "__main__":
                                                   camera_parameters=c,
                                                   points_cur=points_cur,
                                                   points_target=points_target)
-        # logging.info(f'points_cur: {points_cur}, points_step: {points_step}')
+        logging.info(f'points_cur: {points_cur}, points_step: {points_step}')
         points_cur = points_step
         logging.info(f'loss: {loss.item()}, ws: {ws.mean()}')
         opt.zero_grad()
         loss.backward()
         opt.step()
-        if step % 10 == 0:
+        if step % 100 == 0:
             save_eg3d_img(img, f'output/step_{step}.png')
             # gen_mesh_ply(f'output/mesh_{step}.ply', model.backbone_3dgan, ws.detach(), mesh_res=256)
+        if torch.norm(points_cur[0].to_tensor() - points_target[0].to_tensor()) < 0.01:
+            break
 
     logging.info(f'points_end: {points_cur}')
     gen_mesh_ply(f'output/mesh_end.ply', model.backbone_3dgan, ws.detach(), mesh_res=256)
