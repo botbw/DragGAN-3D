@@ -207,7 +207,7 @@ class DragStep(nn.Module):
         return ws
 
     def convert_pixel_to_points(self, pixel_i: int, pixel_j: int) -> WorldPoint:
-        assert self.init_run, "Please call init_ws() first to get ws"
+        assert self.init_run, "Call init_ws() first to get ws"
         return pixel_to_real(pixel_i, pixel_j, self.synthesised['ray_origins_image'],
                              self.synthesised['ray_directions_image'],
                              self.synthesised['depth_image'])
@@ -217,12 +217,12 @@ class DragStep(nn.Module):
                 camera_parameters: torch.Tensor,
                 points_cur: List[FeatPoint],
                 points_target: List[FeatPoint],
-                point_step: float = 1.5,
+                point_step: float = 1,
                 r1: int = 3, # num pixels
-                r2: int = 12, # num pixels
-                mask_loss_lambda: float = 10.0,
+                r2: int = 3, # num pixels
+                mask_loss_lambda: float = 5.0,
                 mask: Optional[torch.Tensor] = None):
-        assert self.init_run, "Please call init_ws() first to get ws"
+        assert self.init_run, "Please call init_ws() first to get ws_0"
         assert len(points_cur) == len(points_target), "Number of points should be the same."
 
         synthesised = self.backbone_3dgan.synthesis(ws, camera_parameters)
@@ -250,7 +250,7 @@ class DragStep(nn.Module):
                 idx = torch.argmin(loss)
                 move_vector = (coordinates[idx].float() - p_cur.to_tensor())
                 points_after_step.append(FeatPoint(coordinates[idx][0].item(), coordinates[idx][1].item(), coordinates[idx][2].item()))
-                logging.info(f'Point track: move vector: {move_vector}, distance: {move_vector.float().norm()}')
+                logging.warning(f'Point track: move vector: {move_vector}, distance: {move_vector.float().norm()}')
                 if torch.allclose(coordinates[idx], p_cur.to_tensor()):
                     logging.warning(f'Point track: point {p_cur} is not moving.')
 
@@ -278,7 +278,7 @@ class DragStep(nn.Module):
                 dis_mask = torch.ones(3, 256, 256, dtype=torch.bool, device=self.device)
                 p_mid_tensor = (0.5 * (p_cur.to_tensor().float() + p_tar.to_tensor())).round().int()
                 p_mid = FeatPoint(p_mid_tensor[0].item(), p_mid_tensor[1].item(), p_mid_tensor[2].item())
-                R = (p_tar.to_tensor().float() - p_cur.to_tensor()).norm().round().int().item() // 2 + 3
+                R = max(1, (p_tar.to_tensor().float() - p_cur.to_tensor()).norm().round().int().item() // 2)
                 coordinates = p_mid.gen_cube_coordinates(R)
                 dis_mask[0, coordinates[..., 1], coordinates[..., 0]] = 0
                 dis_mask[1, coordinates[..., 2], coordinates[..., 0]] = 0
@@ -307,12 +307,12 @@ if __name__ == "__main__":
 
     # see C_xyz at eg3d/docs/camera_coordinate_conventions.jpg
     cam2world_pose = LookAtPoseSampler.sample(
-        horizontal_mean=0.5 * math.pi,  # 相机绕轴按radius旋转 0 -> pi: left view -> right view
-        vertical_mean=0.5 * math.pi,  # 相机绕轴按radius 0 -> pi: up view -> down view
+        horizontal_mean=0.5 * math.pi,
+        vertical_mean=0.5 * math.pi,
         lookat_position=torch.tensor(
-            G.rendering_kwargs['avg_camera_pivot'],  # 按doc坐标是(x, z, y)
+            G.rendering_kwargs['avg_camera_pivot'],
             device='cuda'),
-        radius=G.rendering_kwargs['avg_camera_radius'],  # 相机在world[0, 0, 2.7]
+        radius=G.rendering_kwargs['avg_camera_radius'],
         device='cuda')
 
     fov_deg = 18.837  # 0 -> inf : zoom-in -> zoom-out
@@ -326,23 +326,32 @@ if __name__ == "__main__":
 
     ws0 = model.init_ws(z, c).detach()
     ws = ws0.detach().clone().requires_grad_(True)
+    print(f'ws0: {ws0.shape}')
 
     gen_mesh_ply('output/mesh_start.ply', G, ws.detach(), mesh_res=256)
-    opt = torch.optim.SGD([ws], lr=0.005)
+    opt = torch.optim.SGD([ws], lr=0.001)
 
     points_cur = [FeatPoint(128, 128, 190)]
-    points_target = [FeatPoint(128, 100, 190)]
+    points_target = [FeatPoint(128, 118, 190)]
+    '''
+    0: 无
+    1，2，3: 无
+    4: 年龄变化
+    越大越容易drag
+    无法鼻子左移动（没见过类似图片？）
 
+    '''
+    l_w = 14
     try:
-        for step in range(1000):
-            assert torch.allclose(ws[:, 6:,:], ws0[:,6:,:])
-            assert not (step != 0 and torch.allclose(ws[:, :6, :], ws0[:, :6, :]))
-            ws_input = torch.cat([ws[:,:6,:], ws0[:,6:,:]], dim=1)
+        for step in range(1500):
+            assert torch.allclose(ws[:, l_w:,:], ws0[:,l_w:,:])
+            assert not (step != 0 and l_w != 0 and torch.allclose(ws[:, :l_w, :], ws0[:, :l_w, :]))
+            ws_input = torch.cat([ws[:,:l_w,:], ws0[:,l_w:,:]], dim=1)
             loss, points_step, img, img_depth = model(ws=ws_input,
                                                     camera_parameters=c,
                                                     points_cur=points_cur,
                                                     points_target=points_target)
-            logging.error(f'step: {step}\npoints_cur: {points_cur}\npoints_step: {points_step}')
+            logging.info(f'step: {step}\npoints_cur: {points_cur}\npoints_step: {points_step}')
             points_cur = points_step
             assert not loss.isnan()
             opt.zero_grad()
@@ -351,7 +360,7 @@ if __name__ == "__main__":
             if step % 10 == 0:
                 save_eg3d_img(img, f'output/step_{step}.png')
                 # gen_mesh_ply(f'output/mesh_{step}.ply', model.backbone_3dgan, ws.detach(), mesh_res=256)
-            if torch.norm((points_cur[0].to_tensor() - points_target[0].to_tensor()).float()) <= 5:
+            if torch.norm((points_cur[0].to_tensor() - points_target[0].to_tensor()).float()) <= 4.0:
                 break
     except KeyboardInterrupt:
         pass
