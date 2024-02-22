@@ -1,22 +1,19 @@
-from training.volumetric_rendering.renderer import project_onto_planes, generate_planes
+from functools import cache
 import torch
 from typing import Union
 
-_PLANES = generate_planes().to('cuda')  # TODO @botbw: remove this
-
 CUBE_LIM = 1.0
-
 
 # @dataclass
 class WorldPoint:
     data: torch.Tensor
 
-    def __init__(self, point: torch.Tensor):
-        assert isinstance(point,
-                          torch.Tensor), f'point has to be of type torch.Tensor, got {type(point)}'
-        assert point.shape == (3, ), f'point has to be of shape (3,), got {point.shape}'
-        assert point.dtype == torch.float32, f'point has to be of dtype float32, got {point.dtype}'
-        self.data = point
+    def __init__(self, data: torch.Tensor):
+        assert isinstance(data,
+                          torch.Tensor), f'point has to be of type torch.Tensor, got {type(data)}'
+        assert data.shape == (3, ), f'point has to be of shape (3,), got {data.shape}'
+        assert data.dtype == torch.float32, f'point has to be of dtype float32, got {data.dtype}'
+        self.data = data
 
     @torch.no_grad
     def __add__(self, other: Union[torch.Tensor, 'WorldPoint']):
@@ -36,101 +33,36 @@ class WorldPoint:
         return self.data
 
     @torch.no_grad
-    def gen_circle_coordinates(self, radius: float, step: float) -> torch.Tensor:
-        coordinates = self.data.reshape(1, 1, 3)
-        projected_coordinates = project_onto_planes(_PLANES, coordinates)  # (3, 1, 2) xy, xz, zy
-        projected_coordinates = projected_coordinates.squeeze(1)  # (3, 2)
-        device = coordinates.device
-        return torch.stack([
-            self.__gen_circle_coordinate(radius, projected_coordinates[0], device=device),
-            self.__gen_circle_coordinate(radius, projected_coordinates[1], device=device),
-            self.__gen_circle_coordinate(radius, projected_coordinates[2], device=device)
-        ],
-                           dim=0)
-
-    @torch.no_grad
-    def __gen_circle_coordinate(self, radius: float, step: float, point: torch.Tensor,
-                                device: torch.device) -> torch.Tensor:
-        assert point.shape == (2, )
-        x, y = point.tolist()
-        x_min = max(-CUBE_LIM, x - radius)
-        x_max = min(CUBE_LIM, x + radius)
-        y_min = max(-CUBE_LIM, y - radius)
-        y_max = min(CUBE_LIM, y + radius)
-        x_span = torch.arange(x_min, x_max, step=step, device=device)
-        y_span = torch.arange(y_min, y_max, step=step, device=device)
-        xx, yy = torch.meshgrid(x_span, y_span)
-        inside_sphere = (xx - x)**2 + (yy - y)**2 <= radius**2
-        coordinates = torch.stack((xx[inside_sphere], yy[inside_sphere]), dim=-1).reshape(-1, 2)
-        return coordinates
-
-    @torch.no_grad
-    def gen_square_coordinates(self, half_l: float, step: float) -> torch.Tensor:
-        coordinates = self.data.reshape(1, 1, 3)
-        projected_coordinates = project_onto_planes(_PLANES, coordinates)  # (3, 1, 2) xy, xz, zy
-        projected_coordinates = projected_coordinates.squeeze(1)  # (3, 2)
-        device = coordinates.device
-        return torch.stack([
-            self.__gen_square_coordinate(half_l, projected_coordinates[0], device=device),
-            self.__gen_square_coordinate(half_l, projected_coordinates[1], device=device),
-            self.__gen_square_coordinate(half_l, projected_coordinates[2], device=device)
-        ],
-                           dim=0)
-
-    @torch.no_grad
-    def __gen_square_coordinate(
-        self,
-        half_l: float,
-        step: float,
-        point: torch.Tensor,
-        device: torch.device = torch.device('cuda')) -> torch.Tensor:
-        assert point.shape == (2, )
-        x, y = point.tolist()
-        x_min = max(-CUBE_LIM, x - half_l)
-        x_max = min(CUBE_LIM, x + half_l) + step
-        y_min = max(-CUBE_LIM, y - half_l)
-        y_max = min(CUBE_LIM, y + half_l) + step
-        x_span = torch.arange(x_min, x_max, step=step, device=device)
-        y_span = torch.arange(y_min, y_max, step=step, device=device)
-        xx, yy = torch.meshgrid(x_span, y_span)
-        coordinates = torch.stack((xx, yy), dim=-1).reshape(-1, 2)
-        return coordinates
-
-    @torch.no_grad
     def gen_sphere_coordinates(self, radius: float, step: float) -> torch.Tensor:
-        x, y, z = self.data.tolist()
-        x_min = max(-CUBE_LIM, x - radius)
-        x_max = min(CUBE_LIM, x + radius) + step
-        y_min = max(-CUBE_LIM, y - radius)
-        y_max = min(CUBE_LIM, y + radius) + step
-        z_min = max(-CUBE_LIM, z - radius)
-        z_max = min(CUBE_LIM, z + radius) + step
-        x_span = torch.arange(x_min, x_max, step=step, device=self.data.device)
-        y_span = torch.arange(y_min, y_max, step=step, device=self.data.device)
-        z_span = torch.arange(z_min, z_max, step=step, device=self.data.device)
-        xx, yy, zz = torch.meshgrid(x_span, y_span, z_span)
-        xx, yy, zz = xx.flatten(), yy.flatten(), zz.flatten()
-        inside_sphere = (xx - x)**2 + (yy - y)**2 + \
-            (zz - z)**2 <= radius**2
-        coordinates = torch.stack((xx[inside_sphere], yy[inside_sphere], zz[inside_sphere]), dim=1)
-        return coordinates
+        coord = gen_sphere_coordinates_shift(radius, step, self.data.device) + self.data
+        coord = coord.clamp(-CUBE_LIM, CUBE_LIM)
+        return coord
 
     @torch.no_grad
     def gen_cube_coordinates(self, half_l: float, step: float) -> torch.Tensor:
-        x, y, z = self.data.tolist()
-        x_min = max(-CUBE_LIM, x - half_l)
-        x_max = min(CUBE_LIM, x + half_l) + step
-        y_min = max(-CUBE_LIM, y - half_l)
-        y_max = min(CUBE_LIM, y + half_l) + step
-        z_min = max(-CUBE_LIM, z - half_l)
-        z_max = min(CUBE_LIM, z + half_l) + step
-        x_span = torch.arange(x_min, x_max, step=step, device=self.data.device)
-        y_span = torch.arange(y_min, y_max, step=step, device=self.data.device)
-        z_span = torch.arange(z_min, z_max, step=step, device=self.data.device)
-        xx, yy, zz = torch.meshgrid(x_span, y_span, z_span)
-        coordinates = torch.stack((xx.flatten(), yy.flatten(), zz.flatten()), dim=1)
-        return coordinates
+        coord = gen_sphere_coordinates_shift(half_l, step, self.data.device) + self.data
+        coord = coord.clamp(-CUBE_LIM, CUBE_LIM)
+        return coord
 
+@cache
+@torch.no_grad
+def gen_square_meshgrid(half_l, step, device):
+    x_span = torch.arange(-half_l, half_l + step, step=step, device=device)
+    y_span = torch.arange(-half_l, half_l + step, step=step, device=device)
+    z_span = torch.arange(-half_l, half_l + step, step=step, device=device)
+    return torch.meshgrid(x_span, y_span, z_span)
+
+@cache
+@torch.no_grad
+def gen_sphere_coordinates_shift(radius: float, step: float, device: torch.device) -> torch.Tensor:
+    xx, yy, zz = gen_square_meshgrid(radius, step, device)
+    inside_sphere = xx**2 + yy**2 + zz**2 <= radius**2
+    return torch.stack((xx[inside_sphere], yy[inside_sphere], zz[inside_sphere]), dim=1)
+@cache
+@torch.no_grad
+def gen_cube_coordinates_shift(half_l: float, step: float, device: torch.device) -> torch.Tensor:
+    xx, yy, zz = gen_square_meshgrid(half_l, step, device)
+    return torch.stack((xx.flatten(), yy.flatten(), zz.flatten()), dim=1)
 
 @torch.no_grad
 def pixel_to_real(i: int, j: int, ray_origin: torch.Tensor, ray_dir: torch.Tensor,
