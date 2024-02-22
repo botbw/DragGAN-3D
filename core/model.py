@@ -6,7 +6,7 @@ from functools import partial
 from core.world_point import *
 import torch.nn.functional as F
 from eg3d.eg3d.training.triplane import TriPlaneGenerator
-# from training.volumetric_rendering.renderer import sample_from_planes, project_onto_planes
+from training.volumetric_rendering.renderer import sample_from_planes, project_onto_planes
 from core.utils import *
 from core.log import *
 from core.gen_mesh_ply import *
@@ -220,7 +220,7 @@ class DragStep(nn.Module):
                 point_step: float = 1,
                 r1: int = 3, # num pixels
                 r2: int = 3, # num pixels
-                mask_loss_lambda: float = 5.0,
+                mask_loss_lambda: float = 1.0,
                 mask: Optional[torch.Tensor] = None):
         assert self.init_run, "Please call init_ws() first to get ws_0"
         assert len(points_cur) == len(points_target), "Number of points should be the same."
@@ -250,7 +250,7 @@ class DragStep(nn.Module):
                 idx = torch.argmin(loss)
                 move_vector = (coordinates[idx].float() - p_cur.to_tensor())
                 points_after_step.append(FeatPoint(coordinates[idx][0].item(), coordinates[idx][1].item(), coordinates[idx][2].item()))
-                logging.warning(f'Point track: move vector: {move_vector}, distance: {move_vector.float().norm()}')
+                logging.info(f'Point track: move vector: {move_vector}, distance: {move_vector.float().norm()}')
                 if torch.allclose(coordinates[idx], p_cur.to_tensor()):
                     logging.warning(f'Point track: point {p_cur} is not moving.')
 
@@ -298,8 +298,8 @@ class DragStep(nn.Module):
 if __name__ == "__main__":
     import pickle
     from eg3d.eg3d.camera_utils import FOV_to_intrinsics, LookAtPoseSampler
-
-    seed_everything(100861)
+    seed = 100861
+    seed_everything(seed)
     setup_logger(logging.INFO)
 
     with open('ckpts/ffhq-fixed-triplane512-128.pkl', 'rb') as f:
@@ -328,19 +328,55 @@ if __name__ == "__main__":
     ws = ws0.detach().clone().requires_grad_(True)
     print(f'ws0: {ws0.shape}')
 
-    gen_mesh_ply('output/mesh_start.ply', G, ws.detach(), mesh_res=256)
+    gen_mesh_ply(f'output/{seed}_start.ply', G, ws.detach(), mesh_res=256)
     opt = torch.optim.SGD([ws], lr=0.001)
+    
+    def convert(x, y, z, box_wrap=G.rendering_kwargs['box_warp']):
+        # (2 / box_wrap * (x, y, z) + 1) / 2 * 256 (plane resolution)
+        return (
+            round((2 / box_wrap * x + 1) / 2 * 256),
+            round((2 / box_wrap * y + 1) / 2 * 256),
+            round((2 / box_wrap * z + 1) / 2 * 256)
+        )
 
-    points_cur = [FeatPoint(128, 128, 190)]
-    points_target = [FeatPoint(128, 118, 190)]
-    '''
-    0: 无
-    1，2，3: 无
-    4: 年龄变化
-    越大越容易drag
-    无法鼻子左移动（没见过类似图片？）
+    # 移动鼻子
+    # p = FeatPoint(*convert(0, 0.016565, 0.263870))
+    # t_p = FeatPoint(p.x, p.y - 10, p.z)
+    # points_cur = [p]
+    # points_target = [t_p]
 
-    '''
+    # # 移动眼睛
+    p1 = FeatPoint(*convert(0.08, 0.0963, 0.201))
+    p2 = FeatPoint(*convert(0.08, 0.0563, 0.191))
+    p1_t = FeatPoint(p1.x, p1.y - 10, p1.z)
+    p2_t = FeatPoint(p2.x, p2.y + 10, p2.z)
+    points_cur = [p1, p2]
+    points_target = [p1_t, p2_t]
+
+    # 移动嘴巴
+    # p1 = FeatPoint(*convert(0.0567, -0.08, 0.206))
+    # p2 = FeatPoint(*convert(-0.0567, -0.08, 0.206))
+    # p1_t = FeatPoint(p1.x + 5, p1.y, p1.z)
+    # p2_t = FeatPoint(p2.x - 5, p2.y, p2.z)
+    # points_cur = [p1, p2]
+    # points_target = [p1_t, p2_t]
+
+    #嘴唇
+    # p1 = FeatPoint(*convert(0.004924, -0.064737, 0.267408))
+    # p1_t = FeatPoint(p1.x, p1.y + 5, p1.z)
+    # points_cur = [p1]
+    # points_target = [p1_t]
+
+    # # 移动头发/帽子
+    # p_le = FeatPoint(*convert(-0.1, 0.25, 0.202))
+    # p_mi = FeatPoint(*convert(0, 0.25, 0.202))
+    # p_ri = FeatPoint(*convert(0.1, 0.25, 0.202))
+    # p_le_t = FeatPoint(p_le.x, p_le.y + 8, p_le.z-3)
+    # p_mi_t = FeatPoint(p_mi.x, p_mi.y + 5, p_mi.z-3)
+    # p_ri_t = FeatPoint(p_ri.x, p_ri.y + 5, p_ri.z-3)
+    # points_cur = [p_le, p_mi, p_ri]
+    # points_target = [p_le_t, p_mi_t, p_ri_t]
+
     l_w = 14
     try:
         for step in range(1500):
@@ -360,11 +396,11 @@ if __name__ == "__main__":
             if step % 10 == 0:
                 save_eg3d_img(img, f'output/step_{step}.png')
                 # gen_mesh_ply(f'output/mesh_{step}.ply', model.backbone_3dgan, ws.detach(), mesh_res=256)
-            if torch.norm((points_cur[0].to_tensor() - points_target[0].to_tensor()).float()) <= 4.0:
+            if torch.norm((points_cur[0].to_tensor() - points_target[0].to_tensor()).float()) <= 2.0:
                 break
     except KeyboardInterrupt:
         pass
 
     logging.info(f'points_end: {points_cur}')
-    gen_mesh_ply(f'output/mesh_end.ply', model.backbone_3dgan, ws.detach(), mesh_res=256)
+    gen_mesh_ply(f'output/{seed}_end.ply', model.backbone_3dgan, ws.detach(), mesh_res=256)
     print("passed")
