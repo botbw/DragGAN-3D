@@ -4,45 +4,35 @@ from typing import Union
 
 # @dataclass
 class WorldPoint:
-    data: torch.Tensor
+    tensor: torch.Tensor
 
-    def __init__(self, data: torch.Tensor):
-        assert isinstance(data,
-                          torch.Tensor), f'point has to be of type torch.Tensor, got {type(data)}'
-        assert data.shape == (3, ), f'point has to be of shape (3,), got {data.shape}'
-        assert data.dtype == torch.float32, f'point has to be of dtype float32, got {data.dtype}'
-        self.data = data
+    def __init__(self, tensor: torch.Tensor):
+        assert isinstance(tensor, torch.Tensor), f'point has to be of type torch.Tensor, got {type(tensor)}'
+        assert tensor.shape == (3, ), f'point has to be of shape (3,), got {tensor.shape}'
+        assert tensor.dtype == torch.float32, f'point has to be of dtype float32, got {tensor.dtype}'
+        self.tensor = tensor
 
     def __repr__(self) -> str:
-        x, y, z = self.data.tolist()
+        x, y, z = self.tensor.tolist()
         cls_name = self.__class__.__name__
         return f'{cls_name}(x={x:.4f}, y={y:.4f}, z={z:.4f})'
 
-    @torch.no_grad
-    def gen_sphere_coordinates(self, radius, point_step) -> torch.Tensor:
-        coord = gen_sphere_coordinates_shift(radius, self.data.device) * point_step + self.data
-        return coord
-
-    @torch.no_grad
-    def gen_cube_coordinates(self, half_l, point_step) -> torch.Tensor:
-        coord = gen_sphere_coordinates_shift(half_l, self.data.device) * point_step + self.data
-        return coord
-
 @cache
 @torch.no_grad
-def gen_square_meshgrid(half_l, device):
+def gen_square_meshgrid(half_l: int, device: torch.device):
     span = torch.arange(-half_l, half_l + 1, device=device)
     return torch.meshgrid(span, span, span)
 
 @cache
 @torch.no_grad
-def gen_sphere_coordinates_shift(radius, device: torch.device) -> torch.Tensor:
+def gen_sphere_coordinates_shift(radius: int, device: torch.device) -> torch.Tensor:
     xx, yy, zz = gen_square_meshgrid(radius, device)
     inside_sphere = xx**2 + yy**2 + zz**2 <= radius**2
     return torch.stack((xx[inside_sphere], yy[inside_sphere], zz[inside_sphere]), dim=1)
+
 @cache
 @torch.no_grad
-def gen_cube_coordinates_shift(half_l, device: torch.device) -> torch.Tensor:
+def gen_cube_coordinates_shift(half_l: int, device: torch.device) -> torch.Tensor:
     xx, yy, zz = gen_square_meshgrid(half_l, device)
     return torch.stack((xx.flatten(), yy.flatten(), zz.flatten()), dim=1)
 
