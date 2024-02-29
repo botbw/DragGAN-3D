@@ -213,9 +213,9 @@ class DragStep(nn.Module):
                 points_cur: List[WorldPoint],
                 points_target: List[WorldPoint],
                 r1_in_pixel: int = 3,
-                r2_in_pixel: int = 3,
-                point_step_in_pixel: float = 0.1,
-                mask_loss_lambda: float = 1.0,
+                r2_in_pixel: int = 6,
+                point_step_in_pixel: float = 0.05,
+                mask_loss_lambda: float = 5.0,
                 mask: Optional[torch.Tensor] = None):
         assert self.init_run, "Please call init_ws() first to get ws_0"
         assert len(points_cur) == len(points_target), "Number of points should be the same."
@@ -340,13 +340,20 @@ if __name__ == "__main__":
     # points_cur = [p]
     # points_target = [t_p]
 
-    # # 移动眼睛
-    p1 = WorldPoint(torch.tensor([0.08, 0.09, 0.2], device=device))
-    p2 = WorldPoint(torch.tensor([0.08, 0.07, 0.2], device=device))
-    p1_t = WorldPoint(torch.tensor([0.08, 0.07, 0.2], device=device))
-    p2_t = WorldPoint(torch.tensor([0.08, 0.09, 0.2], device=device))
-    points_cur = [p1, p2]
-    points_target = [p1_t, p2_t]
+    # 移动眼睛
+
+    points_cur = [
+        WorldPoint(torch.tensor([0.08, 0.1, 0.19], device=device)),
+        WorldPoint(torch.tensor([0.08, 0.055, 0.19], device=device)),
+        WorldPoint(torch.tensor([-0.08, 0.09, 0.2], device=device)),
+        WorldPoint(torch.tensor([-0.08, 0.06, 0.2], device=device))
+    ]
+    points_target = [
+        WorldPoint(torch.tensor([0.08, 0.065, 0.19], device=device)),
+        WorldPoint(torch.tensor([0.08, 0.075, 0.19], device=device)),
+        WorldPoint(torch.tensor([-0.08, 0.09, 0.2], device=device)),
+        WorldPoint(torch.tensor([-0.08, 0.06, 0.2], device=device))
+    ]
 
     # 移动嘴巴
     # p1 = WorldPoint(*convert(0.0567, -0.08, 0.206))
