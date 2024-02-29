@@ -213,7 +213,7 @@ class DragStep(nn.Module):
                 points_cur: List[WorldPoint],
                 points_target: List[WorldPoint],
                 r1_in_pixel: int = 3,
-                r2_in_pixel: int = 6,
+                r2_in_pixel: int = 12,
                 point_step_in_pixel: float = 0.05,
                 mask_loss_lambda: float = 5.0,
                 mask: Optional[torch.Tensor] = None):
@@ -332,7 +332,7 @@ if __name__ == "__main__":
     print(f'ws0: {ws0.shape}')
 
     gen_mesh_ply(f'output/{seed}_start.ply', G, ws.detach(), mesh_res=256)
-    opt = torch.optim.SGD([ws], lr=0.001)
+    opt = torch.optim.SGD([ws], lr=0.01)
     
     # # 移动鼻子
     # p = WorldPoint(torch.tensor([0, 0.02, 0.26], device=device))
@@ -341,27 +341,26 @@ if __name__ == "__main__":
     # points_target = [t_p]
 
     # 移动眼睛
-
     points_cur = [
         WorldPoint(torch.tensor([0.08, 0.1, 0.19], device=device)),
-        WorldPoint(torch.tensor([0.08, 0.055, 0.19], device=device)),
+        WorldPoint(torch.tensor([0.08, 0.06, 0.19], device=device)),
         WorldPoint(torch.tensor([-0.08, 0.09, 0.2], device=device)),
         WorldPoint(torch.tensor([-0.08, 0.06, 0.2], device=device))
     ]
     points_target = [
-        WorldPoint(torch.tensor([0.08, 0.065, 0.19], device=device)),
-        WorldPoint(torch.tensor([0.08, 0.075, 0.19], device=device)),
+        WorldPoint(torch.tensor([0.08, 0.08, 0.19], device=device)),
+        WorldPoint(torch.tensor([0.08, 0.08, 0.19], device=device)),
         WorldPoint(torch.tensor([-0.08, 0.09, 0.2], device=device)),
         WorldPoint(torch.tensor([-0.08, 0.06, 0.2], device=device))
     ]
 
     # 移动嘴巴
-    # p1 = WorldPoint(*convert(0.0567, -0.08, 0.206))
-    # p2 = WorldPoint(*convert(-0.0567, -0.08, 0.206))
-    # p1_t = WorldPoint(p1.x + 5, p1.y, p1.z)
-    # p2_t = WorldPoint(p2.x - 5, p2.y, p2.z)
-    # points_cur = [p1, p2]
-    # points_target = [p1_t, p2_t]
+    # points_cur = [
+    #     WorldPoint(torch.tensor([0, -0.085, 0.23], device=device)),
+    # ]
+    # points_target = [
+    #     WorldPoint(torch.tensor([0, -0.10, 0.23], device=device)),
+    # ]
 
     #嘴唇
     # p1 = WorldPoint(*convert(0.004924, -0.064737, 0.267408))
@@ -397,11 +396,23 @@ if __name__ == "__main__":
             if step % 10 == 0:
                 save_eg3d_img(img, f'output/step_{step}.png')
                 # gen_mesh_ply(f'output/mesh_{step}.ply', model.backbone_3dgan, ws.detach(), mesh_res=256)
-            # if torch.norm((points_cur[0].data - points_target[0].data).float()) <= 2.0:
+
+            # points_cur_next = []
+            # points_tar_next = []
+            # stop = True
+            # for p_cur, p_tar in zip(points_cur, points_target):
+            #     if (p_cur.tensor - p_tar.tensor).norm() > 0.001:
+            #         points_cur_next.append(p_cur)
+            #         points_tar_next.append(p_tar)
+            #         stop = False
+            # points_cur = points_cur_next
+            # points_target = points_tar_next
+            # if stop:
             #     break
     except KeyboardInterrupt:
         pass
 
     logging.info(f'points_end: {points_cur}')
+    save_eg3d_img(img, f'output/{seed}_end.png')
     gen_mesh_ply(f'output/{seed}_end.ply', model.backbone_3dgan, ws.detach(), mesh_res=256)
     print("passed")
