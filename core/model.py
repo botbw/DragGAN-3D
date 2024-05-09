@@ -212,8 +212,8 @@ class DragStep(nn.Module):
                 ws: torch.Tensor,
                 points_cur: List[WorldPoint],
                 points_target: List[WorldPoint],
-                r1_in_pixel: int = 3,
-                r2_in_pixel: int = 12,
+                r1_in_pixel: float = 3,
+                r2_in_pixel: float = 12,
                 point_step_in_pixel: float = 0.05,
                 mask_loss_lambda: float = 5.0,
                 mask: Optional[torch.Tensor] = None):
@@ -239,11 +239,11 @@ class DragStep(nn.Module):
         with torch.no_grad():
             for i, (p_cur, p_tar) in enumerate(zip(points_cur, points_target)):
                 coordinates = p_cur.tensor + point_step_real * gen_cube_coordinates_shift(r1_in_pixel, self.device)
-                feat_patch = sample_from_planes(self.backbone_3dgan.renderer.plane_axes,
+                feat_cur = sample_from_planes(self.backbone_3dgan.renderer.plane_axes,
                                                 planes, 
                                                 coordinates.unsqueeze(0),
                                                 box_warp=self.backbone_3dgan.rendering_kwargs['box_warp']).permute(0, 2, 1, 3).view(-1, 96)
-                loss = (feat_patch - self.planes0_points_ref[i]).norm(dim=-1)
+                loss = (feat_cur - self.planes0_points_ref[i]).norm(dim=-1)
                 idx = torch.argmin(loss)
                 move_vector = (coordinates[idx].float() - p_cur.tensor)
                 points_after_step.append(WorldPoint(coordinates[idx]))
@@ -280,7 +280,7 @@ class DragStep(nn.Module):
                 p_mid_tensor = (0.5 * (p_cur.tensor.float() + p_tar.tensor))
                 R = max(r2_in_pixel, (p_tar.tensor.float() - p_cur.tensor).norm().item() * self.planes_resolution // 2)
                 coordinates = p_mid_tensor + point_step_real * gen_sphere_coordinates_shift(R, self.device)
-                coordinates = ((((2 / self.backbone_3dgan.rendering_kwargs['box_warp']) * coordinates) + 1) / 2 * 256).round().long().clamp_max(255)
+                coordinates = ((((2 / self.backbone_3dgan.rendering_kwargs['box_warp']) * coordinates) + 1) / 2 * self.planes_resolution).round().long().clamp_max(255)
                 dis_mask[0, coordinates[..., 1], coordinates[..., 0]] = 0
                 dis_mask[1, coordinates[..., 2], coordinates[..., 0]] = 0
                 dis_mask[2, coordinates[..., 1], coordinates[..., 2]] = 0
@@ -300,12 +300,13 @@ class DragStep(nn.Module):
 if __name__ == "__main__":
     import pickle
     from eg3d.eg3d.camera_utils import FOV_to_intrinsics, LookAtPoseSampler
-    seed = 100861
+    seed = 1008666
     device = torch.device('cuda')
     seed_everything(seed)
     setup_logger(logging.INFO)
 
-    with open('ckpts/ffhq-fixed-triplane512-128.pkl', 'rb') as f:
+    ckpt = '_ckpts/afhqcats512-128.pkl'
+    with open(ckpt, 'rb') as f:
         G = pickle.load(f)['G_ema'].cuda()  # torch.nn.Module
 
     # see C_xyz at eg3d/docs/camera_coordinate_conventions.jpg
@@ -332,11 +333,12 @@ if __name__ == "__main__":
     print(f'ws0: {ws0.shape}')
 
     gen_mesh_ply(f'output/{seed}_start.ply', G, ws.detach(), mesh_res=256)
-    opt = torch.optim.SGD([ws], lr=0.01)
+    lr = 0.01
+    opt = torch.optim.SGD([ws], lr=lr)
     
-    # # 移动鼻子
-    # p = WorldPoint(torch.tensor([0, 0.02, 0.26], device=device))
-    # t_p = WorldPoint(torch.tensor([0, -0.05, 0.26], device=device))
+    # 移动鼻子
+    # p = WorldPoint(torch.tensor([0, 0, 0.26], device=device))
+    # t_p = WorldPoint(torch.tensor([0, -0.04, 0.26], device=device))
     # points_cur = [p]
     # points_target = [t_p]
 
@@ -355,12 +357,12 @@ if __name__ == "__main__":
     ]
 
     # 移动嘴巴
-    # points_cur = [
-    #     WorldPoint(torch.tensor([0, -0.085, 0.23], device=device)),
-    # ]
-    # points_target = [
-    #     WorldPoint(torch.tensor([0, -0.10, 0.23], device=device)),
-    # ]
+    points_cur = [
+        WorldPoint(torch.tensor([0.1, 0.03, 0.03], device=device)),
+    ]
+    points_target = [
+        WorldPoint(torch.tensor([0.1, -0.05, 0.03], device=device)),
+    ]
 
     #嘴唇
     # p1 = WorldPoint(*convert(0.004924, -0.064737, 0.267408))
@@ -379,6 +381,11 @@ if __name__ == "__main__":
     # points_target = [p_le_t, p_mi_t, p_ri_t]
 
     l_w = 14
+    r1_in_pixel: int = 3
+    r2_in_pixel: int = 12
+    point_step_in_pixel: float = 0.05
+    mask_loss_lambda: float = 5.0
+
     try:
         for step in range(3000):
             assert torch.allclose(ws[:, l_w:,:], ws0[:,l_w:,:])
@@ -386,7 +393,11 @@ if __name__ == "__main__":
             ws_input = torch.cat([ws[:,:l_w,:], ws0[:,l_w:,:]], dim=1)
             loss, points_step, img, img_depth = model(ws=ws_input,
                                                     points_cur=points_cur,
-                                                    points_target=points_target)
+                                                    points_target=points_target,
+                                                    r1_in_pixel=r1_in_pixel,
+                                                    r2_in_pixel=r2_in_pixel,
+                                                    point_step_in_pixel=point_step_in_pixel,
+                                                    mask_loss_lambda=mask_loss_lambda)
             logging.info(f'step: {step}\npoints_cur: {points_cur}\npoints_step: {points_step}')
             points_cur = points_step
             assert not loss.isnan()
@@ -394,6 +405,8 @@ if __name__ == "__main__":
             loss.backward()
             opt.step()
             if step % 10 == 0:
+                if step == 30:
+                    break
                 save_eg3d_img(img, f'output/step_{step}.png')
                 # gen_mesh_ply(f'output/mesh_{step}.ply', model.backbone_3dgan, ws.detach(), mesh_res=256)
 
@@ -412,6 +425,23 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         pass
 
+    save_dict({
+        "description": "婴儿张嘴",
+        "ckpt": ckpt,
+        "seed": seed,
+        "opt": type(opt).__name__,
+        "lr": lr,
+        "points_cur": str(points_cur),
+        "points_target": str(points_target),
+        "l_w": l_w,
+        "forward": {
+            "r1_in_pixel": r1_in_pixel,
+            "r2_in_pixel": r2_in_pixel,
+            "point_step_in_pixel": point_step_in_pixel,
+            "mask_loss_lambda": mask_loss_lambda
+        },
+        "end_step": step
+    })
     logging.info(f'points_end: {points_cur}')
     save_eg3d_img(img, f'output/{seed}_end.png')
     gen_mesh_ply(f'output/{seed}_end.ply', model.backbone_3dgan, ws.detach(), mesh_res=256)

@@ -1,3 +1,5 @@
 [submodule "eg3d"]
 	path = eg3d
 	url = https://github.com/botbw/eg3d.git
+	branch = main
+
