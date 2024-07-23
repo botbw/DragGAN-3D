@@ -170,11 +170,6 @@ ckpts
 *.pkl
 *.zip
 
-# symbolic links
-dnnlib
-torch_utils
-training
-
 # images
 *.png
 *.jpg
@@ -185,3 +180,5 @@ training
 
 # test cases
 test_case
+
+tmp/

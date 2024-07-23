@@ -3,3 +3,6 @@
 	url = https://github.com/botbw/eg3d.git
 	branch = main
 
+[submodule "in-n-out"]
+	path = in-n-out
+	url = https://github.com/Twizwei/in-n-out.git
