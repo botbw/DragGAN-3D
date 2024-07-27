@@ -165,11 +165,6 @@ cython_debug/
 # VSCode
 .vscode
 
-# model binary
-ckpts
-*.pkl
-*.zip
-
 # images
 *.png
 *.jpg
@@ -185,10 +180,14 @@ ckpts
 # pytorch binary
 *.pt
 
+# model binary
+ckpts/*
+!ckpts/.gitkeep
+
 # except examples latents
 examples/latents/**
-# !examples/latents/**/
-# !examples/latents/**/*.pt
+!examples/latents/**/
+!examples/latents/**/latents.pt
 
 # mesh
 *.ply
