@@ -1,7 +1,7 @@
-from eg3d.eg3d.shape_utils import convert_sdf_samples_to_ply
-
-import torch
 import numpy as np
+import torch
+
+from eg3d.eg3d.shape_utils import convert_sdf_samples_to_ply
 
 # from eg3d.eg3d.gen_samples import create_samples
 

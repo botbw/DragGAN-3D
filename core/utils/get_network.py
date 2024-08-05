@@ -1,8 +1,8 @@
-from typing import Union
 import os
-from core import PROJ_DIR
-
 import pickle
+from typing import Union
+
+from core import PROJ_DIR
 
 
 def get_network(pkl_file_path: Union[str, os.PathLike]) -> dict:

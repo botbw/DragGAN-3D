@@ -10,8 +10,8 @@ def save_eg3d_img(raw_img: torch.Tensor, path: str = 'my_image.jpg'):
 
 @torch.no_grad
 def save_3d_depth_img(img_depth, path: str = 'depth_img.jpg'):
-    import numpy
     import matplotlib.pyplot as plt
+    import numpy
     from mpl_toolkits.mplot3d import Axes3D
 
     def gaussian_kernel(size: int, sigma: float):
