@@ -15,7 +15,7 @@ import numpy as np
 from training.volumetric_rendering import math_utils
 import logging
 from core.world_point import *
-
+from copy import deepcopy
 
 def wrap_eg3d_backbone(backbone: TriPlaneGenerator) -> nn.Module:
     def renderer_forward(self, planes, decoder, ray_origins, ray_directions, rendering_options):
@@ -167,13 +167,6 @@ def wrap_eg3d_backbone(backbone: TriPlaneGenerator) -> nn.Module:
         # used for extracting shapes.
         planes = self.backbone.synthesis(ws, update_emas=update_emas, **synthesis_kwargs)
         planes = planes.view(len(planes), 3, 32, planes.shape[-2], planes.shape[-1])
-        # #################
-        # x, y, z, r  = 128, 128, 200, 3
-        # fill_value = 1e13
-        # planes[0, 0, :, y-r:y+r, x-r:x+r] = fill_value # yx
-        # planes[0, 1, :, z-r:z+r, x-r:x+r] = fill_value # zx
-        # planes[0, 2, :, y-r:y+r, z-r:z+r] = fill_value # yz
-        # #################
         return self.renderer.run_model(planes, self.decoder, coordinates, directions,
                                        self.rendering_kwargs)
 
@@ -213,13 +206,14 @@ class DragStep(nn.Module):
                 points_cur: List[WorldPoint],
                 points_target: List[WorldPoint],
                 move_distance: float = 0.0001,
-                r1_in_pixel: int = 3,
-                r2_in_pixel: int = 12,
+                r1: float = 3,
+                r2: float = 12,
                 pixel_step: float = 0.05,
                 mask_loss_lambda: float = 5.0,
                 ):
         assert self.init_run, "Please call init_ws() first to get ws_0"
         assert len(points_cur) == len(points_target), "Number of points should be the same."
+
         synthesised = self.backbone_3dgan.synthesis(ws, self.camera_parameters)
         img, planes = synthesised['image'], synthesised['planes']
 
@@ -234,9 +228,11 @@ class DragStep(nn.Module):
 
         # Point tracking with feature matching
         points_after_step = []
+
+        r1_in_pixel = r1 // pixel_step
         with torch.no_grad():
             for i, (p_cur, p_tar) in enumerate(zip(points_cur, points_target)):
-                coordinates = p_cur.tensor + pixel_step * gen_cube_coordinates_shift(r1_in_pixel, self.device)
+                coordinates = p_cur.tensor + pixel_step * gen_square_coordinates_shift(r1_in_pixel, self.device)
                 feat_cur = sample_from_planes(self.backbone_3dgan.renderer.plane_axes,
                                                 planes, 
                                                 coordinates.unsqueeze(0),
@@ -252,11 +248,12 @@ class DragStep(nn.Module):
         loss = 0
 
         loss_motion = 0
+        r2_in_pixel = r2 // pixel_step
         for p_cur, p_tar in zip(points_cur, points_target):
             with torch.no_grad():
                 v_cur_tar = p_tar.tensor - p_cur.tensor
                 e_cur_tar = v_cur_tar / (torch.norm(v_cur_tar.float()) + 1e-9)
-                coordinates_cur = p_cur.tensor + pixel_step * gen_sphere_coordinates_shift(r2_in_pixel, self.device)
+                coordinates_cur = p_cur.tensor + pixel_step * gen_circle_coordinates_shift(r2_in_pixel, self.device)
                 coordinates_step = coordinates_cur + move_distance * e_cur_tar
                 feat_cur = sample_from_planes(self.backbone_3dgan.renderer.plane_axes,
                                                 planes,
@@ -272,33 +269,32 @@ class DragStep(nn.Module):
         loss += loss_motion
 
         mask_loss = 0
-        overall_editable_mask = None
-        assert mask_loss_lambda == 0, "mask_loss seems not working well"
+        assert mask_loss_lambda == 0, "mask not working"
         for p_cur, p_tar in zip(points_cur, points_target):
+            continue
             with torch.no_grad():
                 editable_mask = torch.zeros(3, self.planes_resolution, self.planes_resolution, dtype=torch.bool, device=self.device)
                 p_mid_tensor = (0.5 * (p_cur.tensor.float() + p_tar.tensor))
-                R = max(r2_in_pixel, (p_tar.tensor.float() - p_cur.tensor).norm().item() * self.planes_resolution // 2)
-                coordinates = p_mid_tensor + pixel_step * gen_sphere_coordinates_shift(R, self.device)
+                R_real = max(r2_in_pixel * pixel_step, (p_tar.tensor - p_cur.tensor).norm() / 2)
+                R_pixel = 12
+                logging.debug(f"{p_mid_tensor=}, {R_real=} {R_pixel=}")
+                coordinates = p_mid_tensor + pixel_step * gen_sphere_coordinates_shift(R_pixel, self.device)
                 coordinates = ((((2 / self.backbone_3dgan.rendering_kwargs['box_warp']) * coordinates) + 1) / 2 * self.planes_resolution).round().long().clamp_max(255)
                 editable_mask[0, coordinates[..., 1], coordinates[..., 0]] = 1
                 editable_mask[1, coordinates[..., 2], coordinates[..., 0]] = 1
                 editable_mask[2, coordinates[..., 1], coordinates[..., 2]] = 1
-                if overall_editable_mask is None:
-                    overall_editable_mask = editable_mask
-                else:
-                    overall_editable_mask = overall_editable_mask & editable_mask
-        # mask uneditable area
-        overall_editable_mask = overall_editable_mask
-        mask_loss += mask_loss_lambda * F.l1_loss(planes.permute(0, 2, 1, 3, 4) * overall_editable_mask, self.planes0.permute(0, 2, 1, 3, 4) * overall_editable_mask)
+            # mask uneditable area
+            # editable_mask = ~editable_mask
+            logging.debug(f"mask percent {editable_mask.sum() / editable_mask.numel()}")
+            mask_loss += mask_loss_lambda * F.l1_loss(planes.permute(0, 2, 1, 3, 4) * editable_mask, self.planes0.permute(0, 2, 1, 3, 4) * editable_mask)
 
         loss += mask_loss
 
-        logging.info(f'loss: {loss.item()}, motion_loss: {loss_motion.item()}') #, mask_loss: {mask_loss.item()}')
+        logging.info(f'loss: {loss}, motion_loss: {loss_motion} mask_loss: {mask_loss}')
 
         return loss, points_after_step, img, synthesised['depth_image']
 
-INIT_FROM_RANDOM = True
+INIT_FROM_RANDOM = False
 if __name__ == "__main__":
     import pickle
     from eg3d.eg3d.camera_utils import FOV_to_intrinsics, LookAtPoseSampler
@@ -310,7 +306,7 @@ if __name__ == "__main__":
     ckpt = 'ckpts/ffhqrebalanced512-128.pkl'
     with open(ckpt, 'rb') as f:
         G = pickle.load(f)['G_ema'].cuda()  # torch.nn.Module
-    
+
     model = DragStep(wrap_eg3d_backbone(G), device=device)
     z = torch.randn([1, G.z_dim]).cuda()
 
@@ -329,41 +325,42 @@ if __name__ == "__main__":
         intrinsics = FOV_to_intrinsics(fov_deg, device=device)
         c = torch.cat(
             [cam2world_pose.reshape(-1, 16), intrinsics.reshape(-1, 9)], 1)  # camera parameters
-    
+
         ws0 = model.init_ws(z, c).detach()
-        
+
     else:
-        cam_dict = torch.load('/home/nvme-share/home/wanghaoxuan/DragGAN-3D/examples/latents/trump/cam_params.pt')
+        cam_dict = torch.load('/home/nvme-share/home/wanghaoxuan/DragGAN-3D/examples/latents/anne/cam_params.pt')
         c = torch.cat(
             [cam_dict['cam_params'].reshape(-1, 16), cam_dict['cam_intrinsics'].reshape(-1, 9)], 1).cuda()
 
         model.init_ws(z, c)
-        ws0 = torch.load('/home/nvme-share/home/wanghaoxuan/DragGAN-3D/examples/latents/trump/latents.pt')['w_plus'].cuda()
+        ws0 = torch.load('/home/nvme-share/home/wanghaoxuan/DragGAN-3D/examples/latents/anne/latents.pt')['w_plus'].cuda()
 
     ws = ws0.detach().clone().requires_grad_(True)
     print(f'ws0: {ws0.shape}')
 
+    if not os.path.exists('examples/outputs'):
+        os.makedirs('examples/outputs')
+
     os.system('rm examples/outputs/*')
     gen_mesh_ply(f'examples/outputs/{seed}_start.ply', G, ws.detach(), mesh_res=256)
-    lr = 1e-4
+    lr = 5e-5
     opt = torch.optim.SGD([ws], lr=lr)
     
-    p = WorldPoint(torch.tensor([0, -.12, 0.22], device=device))
-    t_p = WorldPoint(torch.tensor([0, -0.08, 0.22], device=device))
-    points_cur = [p]
+    p = WorldPoint(torch.tensor([.077, .074, .25], device=device))
+    t_p = WorldPoint(torch.tensor([.077, .064, .25], device=device))
+    points_ori = [p]
+    points_cur = deepcopy(points_ori)
     points_target = [t_p]
 
     l_w = 14  # fisrt l_w layers
-    move_distance = 1e-5
-    r1_real = 0.001
-    r2_real = 0.0001
+    move_distance = r1 = 0.001
+    r2 = r1 // 2
     pixel_step: float = 0.00001
-    r1_in_pixel: int = r1_real / pixel_step
-    r2_in_pixel: int = r2_real / pixel_step
-    mask_loss_lambda: float = .0
+    mask_loss_lambda: float = 0.0
 
     try:
-        for step in range(1000):
+        for step in range(3000):
             assert torch.allclose(ws[:, l_w:,:], ws0[:,l_w:,:])
             assert not (step != 0 and l_w != 0 and torch.allclose(ws[:, :l_w, :], ws0[:, :l_w, :]))
             ws_input = torch.cat([ws[:,:l_w,:], ws0[:,l_w:,:]], dim=1)
@@ -371,25 +368,25 @@ if __name__ == "__main__":
                                                     points_cur=points_cur,
                                                     points_target=points_target,
                                                     move_distance=move_distance,
-                                                    r1_in_pixel=r1_in_pixel,
-                                                    r2_in_pixel=r2_in_pixel,
+                                                    r1=r1,
+                                                    r2=r2,
                                                     pixel_step=pixel_step,
                                                     mask_loss_lambda=mask_loss_lambda)
-            logging.info(f'step: {step}\npoints_cur: {points_cur}\npoints_step: {points_step}')
+            logging.info(f'step: {step}\npoints_ori: {points_ori}\npoints_cur: {points_cur}\npoints_tar: {points_target}')
             points_cur = points_step
             assert not loss.isnan()
             opt.zero_grad()
             loss.backward()
             opt.step()
-            if step % 100 == 0:
-                save_eg3d_img(img, f'examples/outputs/step_{step}.png')
-                # gen_mesh_ply(f'output/mesh_{step}.ply', model.backbone_3dgan, ws.detach(), mesh_res=256)
+
+            if step == 0 or (step + 1) % 100 == 0:
+                save_eg3d_img(img, f'examples/outputs/step_{step + 1}.png')
 
             points_cur_next = []
             points_tar_next = []
             stop = True
             for p_cur, p_tar in zip(points_cur, points_target):
-                if (p_cur.tensor - p_tar.tensor).norm() > 0.005:
+                if (p_cur.tensor - p_tar.tensor).norm() > 0.001:
                     points_cur_next.append(p_cur)
                     points_tar_next.append(p_tar)
                     stop = False
