@@ -14,6 +14,7 @@ FILE_CONFIG = {
     'ffhq512-128.pkl': (EG3D_HINT, None),
     'ffhqrebalanced512-64.pkl': (EG3D_HINT, None),
     'ffhqrebalanced512-128.pkl': (EG3D_HINT, 'in-n-out/eg3d/pretrained_models/ffhqrebalanced512-128.pkl'),
+    'ffhq-fixed-triplane512-128.pkl': (EG3D_HINT, None),
     'shapenetcars128-64.pkl': (EG3D_HINT, None),
     'PublicMM1/01_MorphableModel.mat': (PREPROCESSING_MODEL_HINT, 'in-n-out/data_preprocessing/ffhq/Deep3DFaceRecon_pytorch/BFM/01_MorphableModel.mat'),
     'Exp_Pca.bin': (PREPROCESSING_MODEL_HINT, 'in-n-out/data_preprocessing/ffhq/Deep3DFaceRecon_pytorch/BFM/Exp_Pca.bin')

@@ -1,5 +1,6 @@
 import torch
 from torchvision.utils import save_image
+import matplotlib.pyplot as plt
 
 
 def save_eg3d_img(raw_img: torch.Tensor, path: str = 'my_image.jpg'):

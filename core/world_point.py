@@ -1,8 +1,9 @@
 from functools import cache
 
 import torch
-from deprecated import deprecated
+import os
 
+REDUCE_MEM = os.environ.get('REDUCE_MEM', "0").lower() in ["1", "TRUE"]
 
 class WorldPoint:
     tensor: torch.Tensor
@@ -22,7 +23,6 @@ class WorldPoint:
 
 @cache
 @torch.no_grad
-@deprecated
 def gen_cube_meshgrid(half_l: int, device: torch.device):
     span = torch.arange(-half_l, half_l + 1, device=device)
     return torch.meshgrid(span, span, span)
@@ -37,7 +37,6 @@ def gen_square_meshgrid(half_l: int, device: torch.device):
 
 @cache
 @torch.no_grad
-@deprecated
 def gen_sphere_coordinates_shift(radius: int, device: torch.device) -> torch.Tensor:
     xx, yy, zz = gen_cube_meshgrid(radius, device)
     inside_sphere = xx**2 + yy**2 + zz**2 <= radius**2
@@ -48,7 +47,6 @@ def gen_sphere_coordinates_shift(radius: int, device: torch.device) -> torch.Ten
 
 @cache
 @torch.no_grad
-@deprecated
 def gen_cube_coordinates_shift(half_l: int, device: torch.device) -> torch.Tensor:
     xx, yy, zz = gen_cube_meshgrid(half_l, device)
     return torch.stack((xx.flatten(), yy.flatten(), zz.flatten()), dim=1)
@@ -84,6 +82,13 @@ def gen_square_coordinates_shift(radius: int, device: torch.device) -> torch.Ten
                              dim=0)
     return torch.unique(all_coord, dim=0)
 
+if REDUCE_MEM:
+    r1_coordinates_shift = gen_square_coordinates_shift
+    r2_coordinates_shift = gen_circle_coordinates_shift
+else:
+    r1_coordinates_shift = gen_cube_coordinates_shift
+    r2_coordinates_shift = gen_sphere_coordinates_shift
+
 
 @torch.no_grad
 def pixel_to_real(i: int, j: int, ray_origin: torch.Tensor, ray_dir: torch.Tensor,
@@ -92,10 +97,3 @@ def pixel_to_real(i: int, j: int, ray_origin: torch.Tensor, ray_dir: torch.Tenso
     assert ray_dir.shape == (128, 128, 3)
     assert img_depth.shape == (128, 128)
     return WorldPoint(ray_origin + img_depth[i, j] * ray_dir[i, j])
-
-
-if __name__ == '__main__':
-    cube = gen_cube_coordinates_shift(1, torch.device('cpu'))
-    square = gen_square_coordinates_shift(1, torch.device('cpu'))
-    print(cube, cube.shape)
-    print(square, square.shape)

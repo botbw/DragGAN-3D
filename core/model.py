@@ -12,11 +12,12 @@ import torch.nn.functional as F
 from core.gen_mesh_ply import gen_mesh_ply
 from core.log import setup_logger
 from core.utils import seed_everything, save_eg3d_img
-from core.world_point import WorldPoint, gen_circle_coordinates_shift, gen_square_coordinates_shift
+from core.world_point import WorldPoint, r1_coordinates_shift, r2_coordinates_shift
 from eg3d.eg3d.training.triplane import TriPlaneGenerator
 from training.volumetric_rendering import math_utils
 from training.volumetric_rendering.renderer import sample_from_planes
 
+import matplotlib.pyplot as plt
 
 # yapf: disable
 def wrap_eg3d_backbone(backbone: TriPlaneGenerator) -> nn.Module:
@@ -209,11 +210,10 @@ class DragStep(nn.Module):
         ws: torch.Tensor,
         points_cur: List[WorldPoint],
         points_target: List[WorldPoint],
-        move_distance: float = 0.0001,
-        r1: float = 3,
-        r2: float = 12,
-        pixel_step: float = 0.05,
-        mask_loss_lambda: float = 5.0,
+        r1: float,
+        r2: float,
+        pixel_step: float,
+        mask_loss_lambda: float,
     ):
         assert self.init_run, "Please call init_ws() first to get ws_0"
         assert len(points_cur) == len(points_target), "Number of points should be the same."
@@ -235,10 +235,10 @@ class DragStep(nn.Module):
         # Point tracking with feature matching
         points_after_step = []
 
-        r1_in_pixel = r1 // pixel_step
+        r1_in_pixel = r1 * self.planes_resolution
         with torch.no_grad():
             for i, (p_cur, p_tar) in enumerate(zip(points_cur, points_target)):
-                coordinates = p_cur.tensor + pixel_step * gen_square_coordinates_shift(
+                coordinates = p_cur.tensor + pixel_step * r1_coordinates_shift(
                     r1_in_pixel, self.device)
                 feat_cur = sample_from_planes(
                     self.backbone_3dgan.renderer.plane_axes,
@@ -252,7 +252,7 @@ class DragStep(nn.Module):
                 move_vector = (coordinates[idx].float() - p_cur.tensor)
                 points_after_step.append(WorldPoint(coordinates[idx]))
                 logging.info(
-                    f'Point track:\n\tnumebr of cube coordinates: {coordinates.shape[0]}\n\tmove vector: {move_vector}\n\tdistance: {move_vector.float().norm()}'
+                    f'Point track:\n\t {r1_in_pixel=} {self.planes_resolution=} numebr of cube coordinates: {coordinates.shape[0]}\n\tmove vector: {move_vector}\n\tdistance: {move_vector.float().norm()}'
                 )
                 if torch.allclose(coordinates[idx], p_cur.tensor):
                     logging.warning(f'Point track: point {p_cur} is not moving.')
@@ -260,14 +260,14 @@ class DragStep(nn.Module):
         loss = 0
 
         loss_motion = 0
-        r2_in_pixel = r2 // pixel_step
+        r2_in_pixel = r2 * self.planes_resolution
         for p_cur, p_tar in zip(points_cur, points_target):
             with torch.no_grad():
                 v_cur_tar = p_tar.tensor - p_cur.tensor
-                e_cur_tar = v_cur_tar / (torch.norm(v_cur_tar.float()) + 1e-9)
-                coordinates_cur = p_cur.tensor + pixel_step * gen_circle_coordinates_shift(
+                e_cur_tar = v_cur_tar / (torch.norm(v_cur_tar.float()) + 1e-20)
+                coordinates_cur = p_cur.tensor + pixel_step * r2_coordinates_shift(
                     r2_in_pixel, self.device)
-                coordinates_step = coordinates_cur + move_distance * e_cur_tar
+                coordinates_step = coordinates_cur + pixel_step * e_cur_tar
                 feat_cur = sample_from_planes(
                     self.backbone_3dgan.renderer.plane_axes,
                     planes,
@@ -280,64 +280,60 @@ class DragStep(nn.Module):
                 box_warp=self.backbone_3dgan.rendering_kwargs['box_warp'])
             loss_motion += F.l1_loss(feat_cur.detach(), feat_step)
             logging.info(
-                f'Motion supervision: numebr of sphere coordinates: {coordinates_cur.shape[0]}')
+                f'{r2_in_pixel=} \n\tMotion supervision: numebr of sphere coordinates: {coordinates_cur.shape[0]}')
 
         loss += loss_motion
 
         mask_loss = 0
-        assert mask_loss_lambda == 0, "mask not working"
         for p_cur, p_tar in zip(points_cur, points_target):
-            continue
             with torch.no_grad():
-                editable_mask = torch.zeros(3,
-                                            self.planes_resolution,
-                                            self.planes_resolution,
-                                            dtype=torch.bool,
-                                            device=self.device)
+                mask = torch.ones(3,
+                            self.planes_resolution,
+                            self.planes_resolution,
+                            device=self.device)
                 p_mid_tensor = (0.5 * (p_cur.tensor.float() + p_tar.tensor))
-                R_real = max(r2_in_pixel * pixel_step, (p_tar.tensor - p_cur.tensor).norm() / 2)
-                R_pixel = 12
-                logging.debug(f"{p_mid_tensor=}, {R_real=} {R_pixel=}")
-                coordinates = p_mid_tensor + pixel_step * gen_sphere_coordinates_shift(
+                R_real = max(r2, (p_tar.tensor - p_cur.tensor).norm() / 2)
+                R_pixel = R_real * self.planes_resolution
+                coordinates = p_mid_tensor + pixel_step * r2_coordinates_shift(
                     R_pixel, self.device)
                 coordinates = (((
                     (2 / self.backbone_3dgan.rendering_kwargs['box_warp']) * coordinates) + 1) /
                                2 * self.planes_resolution).round().long().clamp_max(255)
-                editable_mask[0, coordinates[..., 1], coordinates[..., 0]] = 1
-                editable_mask[1, coordinates[..., 2], coordinates[..., 0]] = 1
-                editable_mask[2, coordinates[..., 1], coordinates[..., 2]] = 1
+                mask[0, coordinates[..., 1], coordinates[..., 0]] = 0
+                mask[1, coordinates[..., 2], coordinates[..., 0]] = 0
+                mask[2, coordinates[..., 1], coordinates[..., 2]] = 0
             # mask uneditable area
-            # editable_mask = ~editable_mask
-            logging.debug(f"mask percent {editable_mask.sum() / editable_mask.numel()}")
+            logging.info(f"mask percent {mask.sum() / mask.numel()}")
             mask_loss += mask_loss_lambda * F.l1_loss(
-                planes.permute(0, 2, 1, 3, 4) * editable_mask,
-                self.planes0.permute(0, 2, 1, 3, 4) * editable_mask)
+                planes.permute(0, 2, 1, 3, 4) * mask,
+                self.planes0.permute(0, 2, 1, 3, 4) * mask)
 
         loss += mask_loss
 
         logging.info(f'loss: {loss}, motion_loss: {loss_motion} mask_loss: {mask_loss}')
+        logging.debug(f"{r1_in_pixel=} {r2_in_pixel=} {pixel_step=}")
 
         return loss, points_after_step, img, synthesised['depth_image']
 
 
-INIT_FROM_RANDOM = False
+RANDOM = os.environ.get('RANDOM', '0').lower() in ['1', 'true']
 if __name__ == "__main__":
     import pickle
 
     from eg3d.eg3d.camera_utils import FOV_to_intrinsics, LookAtPoseSampler
-    seed = 1008666
+    seed = 100861
     device = torch.device('cuda')
     seed_everything(seed)
     setup_logger(logging.DEBUG)
 
-    ckpt = 'ckpts/ffhqrebalanced512-128.pkl'
+    ckpt = 'ckpts/ffhq-fixed-triplane512-128.pkl'
     with open(ckpt, 'rb') as f:
         G = pickle.load(f)['G_ema'].cuda()  # torch.nn.Module
 
     model = DragStep(wrap_eg3d_backbone(G), device=device)
     z = torch.randn([1, G.z_dim]).cuda()
 
-    if INIT_FROM_RANDOM:
+    if RANDOM:
         # see C_xyz at eg3d/docs/camera_coordinate_conventions.jpg
         cam2world_pose = LookAtPoseSampler.sample(horizontal_mean=0.5 * math.pi,
                                                   vertical_mean=0.5 * math.pi,
@@ -374,30 +370,40 @@ if __name__ == "__main__":
 
     os.system('rm examples/outputs/*')
     gen_mesh_ply(f'examples/outputs/{seed}_start.ply', G, ws.detach(), mesh_res=256)
-    lr = 5e-5
+    lr = 1e-3
     opt = torch.optim.SGD([ws], lr=lr)
 
-    p = WorldPoint(torch.tensor([.077, .074, .25], device=device))
-    t_p = WorldPoint(torch.tensor([.077, .064, .25], device=device))
-    points_ori = [p]
+    p = WorldPoint(torch.tensor([0.08, 0.1, 0.19], device=device))
+    t_p = WorldPoint(torch.tensor([0.08, 0.06, 0.19], device=device))
+    points_ori = [
+        WorldPoint(torch.tensor([0.08, 0.1, 0.19], device=device)),
+        WorldPoint(torch.tensor([0.08, 0.06, 0.19], device=device)),
+        WorldPoint(torch.tensor([-0.08, 0.09, 0.2], device=device)),
+        WorldPoint(torch.tensor([-0.08, 0.06, 0.2], device=device))
+    ]
+    points_target = [
+        WorldPoint(torch.tensor([0.08, 0.079, 0.19], device=device)),
+        WorldPoint(torch.tensor([0.08, 0.081, 0.19], device=device)),
+        WorldPoint(torch.tensor([-0.08, 0.09, 0.2], device=device)),
+        WorldPoint(torch.tensor([-0.08, 0.06, 0.2], device=device))
+    ]
     points_cur = deepcopy(points_ori)
-    points_target = [t_p]
 
     l_w = 14  # fisrt l_w layers
-    move_distance = r1 = 0.001
-    r2 = r1 // 2
-    pixel_step: float = 0.00001
-    mask_loss_lambda: float = 0.0
+    r1 = 3 / model.planes_resolution
+    r2 = 12 / model.planes_resolution
+    pixel_step: float = 0.05 / model.planes_resolution
+    mask_loss_lambda: float = 5.0
 
+    torch.save({'w_plus': ws}, f'examples/outputs/latent_{seed}_start.pt')
     try:
-        for step in range(3000):
+        for step in range(10000):
             assert torch.allclose(ws[:, l_w:, :], ws0[:, l_w:, :])
             assert not (step != 0 and l_w != 0 and torch.allclose(ws[:, :l_w, :], ws0[:, :l_w, :]))
             ws_input = torch.cat([ws[:, :l_w, :], ws0[:, l_w:, :]], dim=1)
             loss, points_step, img, img_depth = model(ws=ws_input,
                                                       points_cur=points_cur,
                                                       points_target=points_target,
-                                                      move_distance=move_distance,
                                                       r1=r1,
                                                       r2=r2,
                                                       pixel_step=pixel_step,
@@ -414,25 +420,44 @@ if __name__ == "__main__":
             if step == 0 or (step + 1) % 100 == 0:
                 save_eg3d_img(img, f'examples/outputs/step_{step + 1}.png')
 
-            points_cur_next = []
-            points_tar_next = []
-            stop = True
-            for p_cur, p_tar in zip(points_cur, points_target):
-                if (p_cur.tensor - p_tar.tensor).norm() > 0.001:
-                    points_cur_next.append(p_cur)
-                    points_tar_next.append(p_tar)
-                    stop = False
-            points_cur = points_cur_next
-            points_target = points_tar_next
-            if stop:
+            if not any((p_cur.tensor - p_tar.tensor).norm() > 0.001 for p_cur, p_tar in zip(points_cur, points_target)):
+                logging.info("Early stop since all points move to corresponding target")
                 break
+
     except KeyboardInterrupt:
         pass
 
     logging.info(f'points_end: {points_cur}')
     save_eg3d_img(img, f'examples/outputs/{seed}_end.png')
+    torch.save({'w_plus': ws}, f'examples/outputs/latent_{seed}_end.pt')
     gen_mesh_ply(f'examples/outputs/{seed}_end.ply',
                  model.backbone_3dgan,
                  ws.detach(),
                  mesh_res=256)
-    print("passed")
+
+    fig, axs = plt.subplots(1, 3, figsize=(15, 5), dpi=70)
+    for i, horrizontal_mean in enumerate([0.35 * math.pi, 0.5 * math.pi, 0.65 * math.pi]):
+        cam2world_pose = LookAtPoseSampler.sample(horizontal_mean=horrizontal_mean,
+                                                vertical_mean=0.5 * math.pi,
+                                                lookat_position=torch.tensor(
+                                                    G.rendering_kwargs['avg_camera_pivot'],
+                                                    device=device),
+                                                radius=G.rendering_kwargs['avg_camera_radius'],
+                                                device=device)
+
+        fov_deg = 18.837  # 0 -> inf : zoom-in -> zoom-out
+        intrinsics = FOV_to_intrinsics(fov_deg, device=device)
+        c = torch.cat([cam2world_pose.reshape(-1, 16),
+                        intrinsics.reshape(-1, 9)], 1)  # camera parameters
+        synthesised = G.synthesis(ws, c)
+        image = synthesised['image']
+        image = image[0].detach()
+        image = (image + 1) / 2
+        image = image.permute(1, 2, 0).cpu().numpy()
+        axs[i].imshow(image)
+        axs[i].axis('off')
+    plt.tight_layout()
+    plt.savefig('examples/outputs/triple_view.png', bbox_inches='tight', pad_inches=0.1)
+
+    print("Finished")
+
