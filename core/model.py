@@ -374,10 +374,12 @@ if __name__ == "__main__":
     opt = torch.optim.SGD([ws], lr=lr)
 
     points_ori = [
-        WorldPoint(torch.tensor([0, -0.085, 0.23], device=device)),
+        WorldPoint(torch.tensor([0.276, 0.06, -0.064], device=device)),
+        WorldPoint(torch.tensor([-0.276, 0.06, -0.064], device=device)),
     ]
     points_target = [
-        WorldPoint(torch.tensor([0, -0.12, 0.23], device=device)),
+        WorldPoint(torch.tensor([0.23, 0.06, -0.064], device=device)),
+        WorldPoint(torch.tensor([-0.23, 0.06, -0.064], device=device)),
     ]
     points_cur = deepcopy(points_ori)
 
