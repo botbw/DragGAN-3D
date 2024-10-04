@@ -323,7 +323,7 @@ if __name__ == "__main__":
     import pickle
 
     from eg3d.eg3d.camera_utils import FOV_to_intrinsics, LookAtPoseSampler
-    seed = 100861
+    seed = 100863
     device = torch.device('cuda')
     seed_everything(seed)
     setup_logger(logging.DEBUG)
@@ -374,14 +374,10 @@ if __name__ == "__main__":
     opt = torch.optim.SGD([ws], lr=lr)
 
     points_ori = [
-        WorldPoint(torch.tensor([0, 0.26, 0.20], device=device)),
-        # WorldPoint(torch.tensor([-0.11, 0.25, 0.19], device=device)),
-        # WorldPoint(torch.tensor([0.11, 0.25, 0.19], device=device)),
+        WorldPoint(torch.tensor((0.007814, -0.119218, 0.255816), device=device)),
     ]
     points_target = [
-        WorldPoint(torch.tensor([0, 0.14, 0.24], device=device)),
-        # WorldPoint(torch.tensor([-0.16, 0.30, 0.17], device=device)),
-        # WorldPoint(torch.tensor([0.16, 0.30, 0.17], device=device)),
+        WorldPoint(torch.tensor((0.007814, -0.08, 0.255816), device=device)),
     ]
 
     points_cur = deepcopy(points_ori)
@@ -395,7 +391,7 @@ if __name__ == "__main__":
     print(f"{r1=} {r2=} {pixel_step=} {mask_loss_lambda=} {model.planes_resolution=} {G.z_dim=}")
     torch.save({'w_plus': ws}, f'examples/outputs/latent_{seed}_start.pt')
     try:
-        for step in range(1000):
+        for step in range(500):
             assert torch.allclose(ws[:, l_w:, :], ws0[:, l_w:, :])
             assert not (step != 0 and l_w != 0 and torch.allclose(ws[:, :l_w, :], ws0[:, :l_w, :]))
             ws_input = torch.cat([ws[:, :l_w, :], ws0[:, l_w:, :]], dim=1)
