@@ -317,6 +317,8 @@ class DragStep(nn.Module):
 
 
 RANDOM = os.environ.get('RANDOM', '0').lower() in ['1', 'true']
+LATENT_PATH = os.environ.get('LATENT_PATH', 'examples/latents/biden')
+CKPTS_PATH = os.environ.get('CKPTS_PATH', 'ckpts/ffhq-fixed-triplane512-128.pkl')
 if __name__ == "__main__":
     import pickle
 
@@ -326,41 +328,39 @@ if __name__ == "__main__":
     seed_everything(seed)
     setup_logger(logging.DEBUG)
 
-    ckpt = 'ckpts/ffhq-fixed-triplane512-128.pkl'
+    ckpt = CKPTS_PATH
     with open(ckpt, 'rb') as f:
         G = pickle.load(f)['G_ema'].cuda()  # torch.nn.Module
 
     model = DragStep(wrap_eg3d_backbone(G), device=device)
     z = torch.randn([1, G.z_dim]).cuda()
 
+    # see C_xyz at eg3d/docs/camera_coordinate_conventions.jpg
+    cam2world_pose = LookAtPoseSampler.sample(horizontal_mean=0.5 * math.pi,
+                                                vertical_mean=0.5 * math.pi,
+                                                lookat_position=torch.tensor(
+                                                    G.rendering_kwargs['avg_camera_pivot'],
+                                                    device=device),
+                                                radius=G.rendering_kwargs['avg_camera_radius'],
+                                                device=device)
+
+    fov_deg = 18.837  # 0 -> inf : zoom-in -> zoom-out
+    intrinsics = FOV_to_intrinsics(fov_deg, device=device)
+    c = torch.cat([cam2world_pose.reshape(-1, 16),
+                    intrinsics.reshape(-1, 9)], 1)  # camera parameters
+
     if RANDOM:
-        # see C_xyz at eg3d/docs/camera_coordinate_conventions.jpg
-        cam2world_pose = LookAtPoseSampler.sample(horizontal_mean=0.5 * math.pi,
-                                                  vertical_mean=0.5 * math.pi,
-                                                  lookat_position=torch.tensor(
-                                                      G.rendering_kwargs['avg_camera_pivot'],
-                                                      device=device),
-                                                  radius=G.rendering_kwargs['avg_camera_radius'],
-                                                  device=device)
-
-        fov_deg = 18.837  # 0 -> inf : zoom-in -> zoom-out
-        intrinsics = FOV_to_intrinsics(fov_deg, device=device)
-        c = torch.cat([cam2world_pose.reshape(-1, 16),
-                       intrinsics.reshape(-1, 9)], 1)  # camera parameters
-
         ws0 = model.init_ws(z, c).detach()
-
     else:
-        cam_dict = torch.load(
-            '/home/nvme-share/home/wanghaoxuan/DragGAN-3D/examples/latents/anne/cam_params.pt')
-        c = torch.cat(
+        try:
+            cam_dict = torch.load(LATENT_PATH + '/cam_params.pt')
+            c = torch.cat(
             [cam_dict['cam_params'].reshape(-1, 16), cam_dict['cam_intrinsics'].reshape(-1, 9)],
             1).cuda()
-
+        except Exception:
+            pass
         model.init_ws(z, c)
-        ws0 = torch.load(
-            '/home/nvme-share/home/wanghaoxuan/DragGAN-3D/examples/latents/anne/latents.pt'
-        )['w_plus'].cuda()
+        ws0 = torch.load(LATENT_PATH + '/latents.pt')['w_plus'].cuda()
 
     ws = ws0.detach().clone().requires_grad_(True)
     print(f'ws0: {ws0.shape}')
@@ -374,13 +374,16 @@ if __name__ == "__main__":
     opt = torch.optim.SGD([ws], lr=lr)
 
     points_ori = [
-        WorldPoint(torch.tensor([0.276, 0.06, -0.064], device=device)),
-        WorldPoint(torch.tensor([-0.276, 0.06, -0.064], device=device)),
+        WorldPoint(torch.tensor([0, 0.26, 0.20], device=device)),
+        # WorldPoint(torch.tensor([-0.11, 0.25, 0.19], device=device)),
+        # WorldPoint(torch.tensor([0.11, 0.25, 0.19], device=device)),
     ]
     points_target = [
-        WorldPoint(torch.tensor([0.23, 0.06, -0.064], device=device)),
-        WorldPoint(torch.tensor([-0.23, 0.06, -0.064], device=device)),
+        WorldPoint(torch.tensor([0, 0.14, 0.24], device=device)),
+        # WorldPoint(torch.tensor([-0.16, 0.30, 0.17], device=device)),
+        # WorldPoint(torch.tensor([0.16, 0.30, 0.17], device=device)),
     ]
+
     points_cur = deepcopy(points_ori)
 
     l_w = 14  # fisrt l_w layers
@@ -389,9 +392,10 @@ if __name__ == "__main__":
     pixel_step: float = 0.05 / model.planes_resolution
     mask_loss_lambda: float = 5.0
 
+    print(f"{r1=} {r2=} {pixel_step=} {mask_loss_lambda=} {model.planes_resolution=} {G.z_dim=}")
     torch.save({'w_plus': ws}, f'examples/outputs/latent_{seed}_start.pt')
     try:
-        for step in range(10000):
+        for step in range(1000):
             assert torch.allclose(ws[:, l_w:, :], ws0[:, l_w:, :])
             assert not (step != 0 and l_w != 0 and torch.allclose(ws[:, :l_w, :], ws0[:, :l_w, :]))
             ws_input = torch.cat([ws[:, :l_w, :], ws0[:, l_w:, :]], dim=1)
@@ -429,7 +433,16 @@ if __name__ == "__main__":
                  ws.detach(),
                  mesh_res=256)
 
-    fig, axs = plt.subplots(1, 3, figsize=(15, 5), dpi=70)
+    fig, axs = plt.subplots(1, 4, figsize=(20, 5), dpi=70)
+
+    synthesised = G.synthesis(ws0, c)
+    image = synthesised['image']
+    image = image[0].detach()
+    image = (image + 1) / 2
+    image = image.permute(1, 2, 0).cpu().numpy()
+    axs[0].imshow(image)
+    axs[0].axis('off')
+
     for i, horrizontal_mean in enumerate([0.35 * math.pi, 0.5 * math.pi, 0.65 * math.pi]):
         cam2world_pose = LookAtPoseSampler.sample(horizontal_mean=horrizontal_mean,
                                                 vertical_mean=0.5 * math.pi,
@@ -448,10 +461,11 @@ if __name__ == "__main__":
         image = image[0].detach()
         image = (image + 1) / 2
         image = image.permute(1, 2, 0).cpu().numpy()
-        axs[i].imshow(image)
-        axs[i].axis('off')
+        axs[i + 1].imshow(image)
+        axs[i + 1].axis('off')
+
     plt.tight_layout()
-    plt.savefig('examples/outputs/triple_view.png', bbox_inches='tight', pad_inches=0.1)
+    plt.savefig('examples/outputs/quadruple_view.png', bbox_inches='tight', pad_inches=0.1)
 
     print("Finished")
 

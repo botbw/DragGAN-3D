@@ -188,6 +188,7 @@ ckpts/*
 examples/latents/**
 !examples/latents/**/
 !examples/latents/**/latents.pt
+!examples/latents/**/cam_params.pt
 
 # mesh
 *.ply
