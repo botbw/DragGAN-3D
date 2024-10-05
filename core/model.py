@@ -323,7 +323,7 @@ if __name__ == "__main__":
     import pickle
 
     from eg3d.eg3d.camera_utils import FOV_to_intrinsics, LookAtPoseSampler
-    seed = 100867
+    seed = 100871
     device = torch.device('cuda')
     seed_everything(seed)
     setup_logger(logging.DEBUG)
@@ -373,11 +373,13 @@ if __name__ == "__main__":
     lr = 1e-3
     opt = torch.optim.SGD([ws], lr=lr)
     points_ori = [
-        WorldPoint(torch.tensor((-0.000841, 0.320808, 0.146786), device=device)),
+        WorldPoint(torch.tensor((0.062520,0.080491,0.211594), device=device)),
+        WorldPoint(torch.tensor((-0.069192,0.080518,0.212880), device=device)),
     ]
 
     points_target = [
-        WorldPoint(torch.tensor((0.006054, 0.203150, 0.174579), device=device)),
+        WorldPoint(torch.tensor((0.062520,0.1,0.211594), device=device)),
+        WorldPoint(torch.tensor((-0.069192,0.1,0.212880), device=device)),
     ]
 
     points_cur = deepcopy(points_ori)
