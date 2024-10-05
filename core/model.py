@@ -318,12 +318,12 @@ class DragStep(nn.Module):
 
 RANDOM = os.environ.get('RANDOM', '0').lower() in ['1', 'true']
 LATENT_PATH = os.environ.get('LATENT_PATH', 'examples/latents/biden')
-CKPTS_PATH = os.environ.get('CKPTS_PATH', 'ckpts/ffhq-fixed-triplane512-128.pkl')
+CKPTS_PATH = os.environ.get('CKPTS_PATH', 'ckpts/afhqcats512-128.pkl')
 if __name__ == "__main__":
     import pickle
 
     from eg3d.eg3d.camera_utils import FOV_to_intrinsics, LookAtPoseSampler
-    seed = 100871
+    seed = 10086
     device = torch.device('cuda')
     seed_everything(seed)
     setup_logger(logging.DEBUG)
@@ -372,14 +372,15 @@ if __name__ == "__main__":
     gen_mesh_ply(f'examples/outputs/{seed}_start.ply', G, ws.detach(), mesh_res=256)
     lr = 1e-3
     opt = torch.optim.SGD([ws], lr=lr)
+# [13:34:19] [Picked]	- Tri#376952 
     points_ori = [
-        WorldPoint(torch.tensor((0.062520,0.080491,0.211594), device=device)),
-        WorldPoint(torch.tensor((-0.069192,0.080518,0.212880), device=device)),
+        WorldPoint(torch.tensor((-0.255067,0.243902,-0.041737), device=device)),
+        WorldPoint(torch.tensor((0.234031,0.250351,-0.063874), device=device)),
     ]
 
     points_target = [
-        WorldPoint(torch.tensor((0.062520,0.1,0.211594), device=device)),
-        WorldPoint(torch.tensor((-0.069192,0.1,0.212880), device=device)),
+        WorldPoint(torch.tensor((-0.15,0.243902,-0.041737), device=device)),
+        WorldPoint(torch.tensor((0.15,0.250351,-0.063874), device=device)),
     ]
 
     points_cur = deepcopy(points_ori)
